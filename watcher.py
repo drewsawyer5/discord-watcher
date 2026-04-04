@@ -1,4 +1,5 @@
 import os
+import sys
 import time
 import logging
 from pathlib import Path
@@ -6,6 +7,12 @@ from datetime import datetime
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 from faster_whisper import WhisperModel
+
+# Force UTF-8 output on Windows so emoji in log entries don't crash the terminal
+if sys.stdout.encoding != "utf-8":
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if sys.stderr.encoding != "utf-8":
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 # Paths — override with .env vars if needed
 INBOX_DIR = Path(os.getenv("DISCORD_INBOX", r"C:\Users\drews\.claude\channels\discord\inbox"))
