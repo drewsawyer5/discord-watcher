@@ -2,8 +2,11 @@
 # Designed to run via Task Scheduler every 5 minutes
 # Logs to: Drew_code/discord-watcher/watchdog.log
 
-$logFile  = "C:\Users\drews\Life Org\Drew_code\discord-watcher\watchdog.log"
+$logFile     = "C:\Users\drews\Life Org\Drew_code\discord-watcher\watchdog.log"
 $watcherPath = "C:\Users\drews\Life Org\Drew_code\discord-watcher\watcher.py"
+$watcherDir  = "C:\Users\drews\Life Org\Drew_code\discord-watcher"
+$pythonExe   = "C:\Users\drews\AppData\Local\Programs\Python\Python314\python.exe"
+$claudeDir   = "C:\Users\drews\Life Org"
 $maxLogLines = 300
 
 function Write-Log {
@@ -26,8 +29,9 @@ if ($watcherProc) {
     Write-Log "watcher.py OK (PID $($watcherProc.ProcessId))"
 } else {
     Write-Log "watcher.py NOT running — restarting"
-    Start-Process -FilePath "python" `
+    Start-Process -FilePath $pythonExe `
         -ArgumentList "`"$watcherPath`"" `
+        -WorkingDirectory $watcherDir `
         -WindowStyle Minimized
 }
 
@@ -39,5 +43,6 @@ if ($claudeProc) {
     Write-Log "claude NOT running — restarting"
     Start-Process -FilePath "claude" `
         -ArgumentList "--dangerously-skip-permissions --channels plugin:discord@claude-plugins-official" `
+        -WorkingDirectory $claudeDir `
         -WindowStyle Normal
 }
