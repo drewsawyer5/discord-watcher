@@ -277,7 +277,7 @@ def _apply_ingest_result(result: dict, message_id: str, label: str):
     log.info(f"Done: {result.get('title', label)}")
 
 
-def run_ingest(url: str, message_id: str):
+def run_ingest(url: str, message_id: str) -> bool:
     log.info(f"Ingesting URL: {url}")
     content = fetch_url_content(url)
     try:
@@ -285,9 +285,10 @@ def run_ingest(url: str, message_id: str):
         result = json.loads(raw)
     except Exception as e:
         log.error(f"LLM error for {url}: {e}")
-        post_discord_reply(f"⚠️ Ingest failed for <{url}>: LLM error — {e}", message_id)
-        return
+        post_discord_reply(f"⚠️ Ingest failed for <{url}>: LLM error — will retry next cycle", message_id)
+        return False
     _apply_ingest_result(result, message_id, url)
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -315,17 +316,17 @@ def transcribe_attachment(att: dict) -> str:
         tmp_path.unlink(missing_ok=True)
 
 
-def run_ingest_voice(att: dict, message_id: str):
+def run_ingest_voice(att: dict, message_id: str) -> bool:
     try:
         transcript = transcribe_attachment(att)
     except Exception as e:
         log.error(f"Transcription failed: {e}")
         post_discord_reply(f"⚠️ Voice transcription failed: {e}", message_id)
-        return
+        return False
 
     if not transcript:
         post_discord_reply("⚠️ Voice message was empty or couldn't be transcribed.", message_id)
-        return
+        return True  # not an LLM failure — don't re-queue
 
     try:
         raw = call_llm(
@@ -335,10 +336,11 @@ def run_ingest_voice(att: dict, message_id: str):
         result = json.loads(raw)
     except Exception as e:
         log.error(f"LLM error for voice transcript: {e}")
-        post_discord_reply(f"⚠️ Voice ingest failed: LLM error — {e}", message_id)
-        return
+        post_discord_reply(f"⚠️ Voice ingest failed: LLM error — will retry next cycle", message_id)
+        return False
 
     _apply_ingest_result(result, message_id, f"voice: {att.get('filename', 'message')}")
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -399,16 +401,18 @@ def main():
                     continue
 
                 if should_process(msg):
-                    # URLs
+                    ok = True
                     for url in URL_RE.findall(msg.get("content", "")):
-                        run_ingest(url, msg_id)
-                    # Voice attachments
+                        ok = run_ingest(url, msg_id) and ok
                     for att in msg.get("attachments", []):
                         if Path(att.get("filename", "")).suffix.lower() in AUDIO_EXTENSIONS:
-                            run_ingest_voice(att, msg_id)
-                    state["processed_ids"].append(msg_id)
-                    # Cap to avoid unbounded growth
-                    state["processed_ids"] = state["processed_ids"][-500:]
+                            ok = run_ingest_voice(att, msg_id) and ok
+                    # Only mark processed if everything succeeded — failures re-queue on next poll
+                    if ok:
+                        state["processed_ids"].append(msg_id)
+                        state["processed_ids"] = state["processed_ids"][-500:]
+                    else:
+                        log.info(f"Message {msg_id} will be retried next poll cycle")
 
             save_state(state)
 
