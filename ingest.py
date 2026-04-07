@@ -263,9 +263,9 @@ def fetch_url_content(url: str) -> str:
 _system_prompt: str | None = None
 
 
-def get_system_prompt() -> str:
+def get_system_prompt(force_reload: bool = False) -> str:
     global _system_prompt
-    if _system_prompt is not None:
+    if _system_prompt is not None and not force_reload:
         return _system_prompt
 
     ingest_md = INGEST_INSTRUCTIONS_PATH.read_text(encoding="utf-8")
@@ -309,6 +309,7 @@ Rules:
 - For unsupported (non-image attachment, unknown file type): set files=[] and discord_reply="Unsupported file type — drop via Claude session."
 - discord_reply must be 4 lines or fewer
 - If the user message contains "Raw file: [[path]]", add "- **Raw:** [[path]]" to the ## Metadata section of all wiki pages being created (not to _log.md or _index.md appends)
+- NEVER include paths under "5 - Storage/05 - Raw Ingests/" in the files[] array — those files are already written by the system before your call and must not be overwritten
 """
     return _system_prompt
 
@@ -316,6 +317,9 @@ Rules:
 # ---------------------------------------------------------------------------
 # Core ingest — shared write logic
 # ---------------------------------------------------------------------------
+_RAW_INGEST_PREFIX = "5 - Storage/05 - Raw Ingests/"
+
+
 def _apply_ingest_result(result: dict, message_id: str, label: str):
     """Write files and post reply from a parsed LLM result. Shared by URL and voice paths."""
     ingest_type = result.get("type", "unknown")
@@ -341,6 +345,11 @@ def _apply_ingest_result(result: dict, message_id: str, label: str):
 
         if not rel_path or not file_content:
             log.warning(f"Skipping file op with missing path or content: {op}")
+            continue
+
+        # Raw ingest files are written by Python before the LLM call — never let LLM overwrite them
+        if rel_path.startswith(_RAW_INGEST_PREFIX):
+            log.warning(f"Skipping LLM file op targeting raw ingest path (already written by system): {rel_path}")
             continue
 
         path = VAULT_PATH / rel_path
