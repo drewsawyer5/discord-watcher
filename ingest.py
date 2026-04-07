@@ -16,6 +16,7 @@ import sys
 import json
 import time
 import re
+import base64
 import logging
 import tempfile
 import requests
@@ -58,6 +59,9 @@ SCHEMA_PATH              = Path(r"C:\Users\drews\Life Org\Obsidian\6 - Wiki Hub\
 
 URL_RE = re.compile(r'https?://[^\s>]+')
 AUDIO_EXTENSIONS = {'.ogg', '.mp3', '.mp4', '.wav', '.m4a', '.webm'}
+IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp'}
+IMAGE_MIME = {'.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png',
+              '.gif': 'image/gif', '.webp': 'image/webp', '.bmp': 'image/bmp'}
 
 # ---------------------------------------------------------------------------
 # Whisper model (lazy-loaded on first voice message)
@@ -92,6 +96,21 @@ def call_llm(system: str, user: str) -> str:
         messages=[
             {"role": "system", "content": system},
             {"role": "user",   "content": user},
+        ],
+        response_format={"type": "json_object"},
+    )
+    return resp.choices[0].message.content
+
+
+def call_llm_with_image(system: str, user_text: str, image_b64: str, mime_type: str = "image/jpeg") -> str:
+    resp = get_llm_client().chat.completions.create(
+        model=LLM_MODEL,
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": [
+                {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{image_b64}"}},
+                {"type": "text", "text": user_text},
+            ]},
         ],
         response_format={"type": "json_object"},
     )
@@ -363,11 +382,53 @@ def run_ingest_text(content: str, message_id: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Image ingest
+# ---------------------------------------------------------------------------
+def run_ingest_image(att: dict, message_id: str) -> bool:
+    filename = att.get("filename", "image.jpg")
+    suffix = Path(filename).suffix.lower()
+    mime_type = IMAGE_MIME.get(suffix, "image/jpeg")
+
+    log.info(f"Downloading image: {filename}")
+    try:
+        resp = requests.get(att["url"], headers=_discord_headers(), timeout=30)
+        resp.raise_for_status()
+        image_b64 = base64.b64encode(resp.content).decode("utf-8")
+    except Exception as e:
+        log.error(f"Image download failed: {e}")
+        post_discord_reply(f"⚠️ Image download failed: {e}", message_id)
+        return False
+
+    try:
+        raw = call_llm_with_image(
+            get_system_prompt(),
+            f"Content type: image attachment (Drew dropped this into #inbox)\nFilename: {filename}\n\nDescribe and classify this image for the wiki.",
+            image_b64,
+            mime_type,
+        )
+        result = json.loads(raw)
+    except Exception as e:
+        log.error(f"LLM error for image {filename}: {e}")
+        post_discord_reply("⚠️ Image ingest failed: LLM error — will retry next cycle", message_id)
+        return False
+
+    _apply_ingest_result(result, message_id, f"image: {filename}")
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Message filter
 # ---------------------------------------------------------------------------
 def has_audio_attachment(msg: dict) -> bool:
     return any(
         Path(a.get("filename", "")).suffix.lower() in AUDIO_EXTENSIONS
+        for a in msg.get("attachments", [])
+    )
+
+
+def has_image_attachment(msg: dict) -> bool:
+    return any(
+        Path(a.get("filename", "")).suffix.lower() in IMAGE_EXTENSIONS
         for a in msg.get("attachments", [])
     )
 
@@ -386,6 +447,7 @@ def should_process(msg: dict) -> bool:
     return (
         bool(URL_RE.search(msg.get("content", "")))
         or has_audio_attachment(msg)
+        or has_image_attachment(msg)
         or is_text_drop(msg)
     )
 
@@ -434,8 +496,11 @@ def main():
                     for url in URL_RE.findall(msg.get("content", "")):
                         ok = run_ingest(url, msg_id) and ok
                     for att in msg.get("attachments", []):
-                        if Path(att.get("filename", "")).suffix.lower() in AUDIO_EXTENSIONS:
+                        suffix = Path(att.get("filename", "")).suffix.lower()
+                        if suffix in AUDIO_EXTENSIONS:
                             ok = run_ingest_voice(att, msg_id) and ok
+                        elif suffix in IMAGE_EXTENSIONS:
+                            ok = run_ingest_image(att, msg_id) and ok
                     if is_text_drop(msg):
                         ok = run_ingest_text(msg.get("content", "").strip(), msg_id) and ok
                     # Only mark processed if everything succeeded — failures re-queue on next poll
