@@ -23,7 +23,9 @@ from datetime import datetime
 from dotenv import load_dotenv
 from openai import OpenAI
 
-load_dotenv()
+# Load shared Drew_code/.env (one level up from this repo)
+_env_path = Path(__file__).parent.parent / ".env"
+load_dotenv(_env_path)
 
 if sys.stdout.encoding != "utf-8":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -44,8 +46,8 @@ POLL_INTERVAL      = int(os.getenv("INGEST_POLL_INTERVAL", "30"))
 STATE_FILE         = Path(__file__).parent / "ingest_state.json"
 
 LLM_PROVIDER  = os.getenv("LLM_PROVIDER", "gemini")
-LLM_API_KEY   = os.getenv("LLM_API_KEY", "")
-LLM_MODEL     = os.getenv("LLM_MODEL", "gemini-2.0-flash")
+LLM_API_KEY   = os.getenv("LLM_API_KEY") or os.getenv("GEMINI_API_KEY", "")  # fall back to GEMINI_API_KEY
+LLM_MODEL     = os.getenv("LLM_MODEL") or os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
 LLM_BASE_URL  = os.getenv("LLM_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai/")
 
 INGEST_INSTRUCTIONS_PATH = Path(r"C:\Users\drews\Life Org\MD-AI\01 - CLAUDE\Skills\ingest.md")
