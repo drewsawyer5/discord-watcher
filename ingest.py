@@ -328,7 +328,7 @@ def transcribe_attachment(att: dict) -> str:
         tmp_path = Path(tmp.name)
 
     try:
-        segments, _ = get_whisper_model().transcribe(str(tmp_path), language="en")
+        segments, _ = get_whisper_model().transcribe(str(tmp_path), language="en", condition_on_previous_text=False)
         transcript = " ".join(s.text.strip() for s in segments).strip()
         log.info(f"Transcribed ({len(transcript)} chars): {transcript[:80]}...")
         return transcript

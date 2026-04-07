@@ -50,7 +50,7 @@ def heartbeat_loop():
 
 
 def transcribe(ogg_path: Path) -> str:
-    segments, _ = model.transcribe(str(ogg_path), language="en")
+    segments, _ = model.transcribe(str(ogg_path), language="en", condition_on_previous_text=False)
     return " ".join(s.text.strip() for s in segments).strip()
 
 
