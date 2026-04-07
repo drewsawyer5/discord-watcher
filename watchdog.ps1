@@ -4,6 +4,7 @@
 
 $logFile     = "C:\Users\drews\Life Org\Drew_code\discord-watcher\watchdog.log"
 $watcherPath = "C:\Users\drews\Life Org\Drew_code\discord-watcher\watcher.py"
+$ingestPath  = "C:\Users\drews\Life Org\Drew_code\discord-watcher\ingest.py"
 $watcherDir  = "C:\Users\drews\Life Org\Drew_code\discord-watcher"
 $pythonExe   = "C:\Users\drews\AppData\Local\Programs\Python\Python314\python.exe"
 $claudeExe   = "C:\Users\drews\.local\bin\claude.exe"
@@ -43,6 +44,24 @@ try {
     }
 } catch {
     Write-Log "watcher check error - $($_.Exception.Message)"
+}
+
+# --- Check ingest.py ---
+try {
+    $procs = Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like "*ingest.py*" }
+    if ($procs) {
+        $procId = ($procs | Select-Object -First 1).ProcessId
+        Write-Log "ingest.py OK - pid $procId"
+    } else {
+        Write-Log "ingest.py NOT running - restarting"
+        Start-Process -FilePath $pythonExe `
+            -ArgumentList "`"$ingestPath`"" `
+            -WorkingDirectory $watcherDir `
+            -WindowStyle Minimized
+        Write-Log "ingest.py start issued"
+    }
+} catch {
+    Write-Log "ingest check error - $($_.Exception.Message)"
 }
 
 # --- Check Claude --channels session ---
