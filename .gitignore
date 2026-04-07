@@ -10,3 +10,6 @@ build/
 .venv/
 venv/
 *.log
+*_state.json
+status.json
+=*
