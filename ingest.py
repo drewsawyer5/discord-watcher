@@ -62,6 +62,7 @@ AUDIO_EXTENSIONS = {'.ogg', '.mp3', '.mp4', '.wav', '.m4a', '.webm'}
 IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp'}
 IMAGE_MIME = {'.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png',
               '.gif': 'image/gif', '.webp': 'image/webp', '.bmp': 'image/bmp'}
+PDF_EXTENSIONS = {'.pdf'}
 
 # ---------------------------------------------------------------------------
 # Whisper model (lazy-loaded on first voice message)
@@ -417,11 +418,71 @@ def run_ingest_image(att: dict, message_id: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# PDF ingest
+# ---------------------------------------------------------------------------
+def run_ingest_pdf(att: dict, message_id: str) -> bool:
+    import pdfplumber
+
+    filename = att.get("filename", "document.pdf")
+    log.info(f"Downloading PDF: {filename}")
+
+    try:
+        resp = requests.get(att["url"], headers=_discord_headers(), timeout=30)
+        resp.raise_for_status()
+    except Exception as e:
+        log.error(f"PDF download failed: {e}")
+        post_discord_reply(f"⚠️ PDF download failed: {e}", message_id)
+        return False
+
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+            tmp.write(resp.content)
+            tmp_path = Path(tmp.name)
+        try:
+            with pdfplumber.open(tmp_path) as pdf:
+                text = "\n".join(page.extract_text() or "" for page in pdf.pages).strip()
+        finally:
+            tmp_path.unlink(missing_ok=True)
+    except Exception as e:
+        log.error(f"PDF extraction failed: {e}")
+        post_discord_reply(f"⚠️ PDF text extraction failed: {e}", message_id)
+        return False
+
+    if not text:
+        post_discord_reply(
+            "⚠️ PDF appears to be image-only — text extraction returned nothing. Drop via Claude session for vision-based ingest.",
+            message_id,
+        )
+        return True  # Not a retry-able failure
+
+    try:
+        raw = call_llm(
+            get_system_prompt(),
+            f"Content type: PDF attachment (Drew dropped this into #inbox)\nFilename: {filename}\n\nExtracted text (capped at 12k):\n{text[:12000]}",
+        )
+        result = json.loads(raw)
+    except Exception as e:
+        log.error(f"LLM error for PDF {filename}: {e}")
+        post_discord_reply("⚠️ PDF ingest failed: LLM error — will retry next cycle", message_id)
+        return False
+
+    _apply_ingest_result(result, message_id, f"pdf: {filename}")
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Message filter
 # ---------------------------------------------------------------------------
 def has_audio_attachment(msg: dict) -> bool:
     return any(
         Path(a.get("filename", "")).suffix.lower() in AUDIO_EXTENSIONS
+        for a in msg.get("attachments", [])
+    )
+
+
+def has_pdf_attachment(msg: dict) -> bool:
+    return any(
+        Path(a.get("filename", "")).suffix.lower() in PDF_EXTENSIONS
         for a in msg.get("attachments", [])
     )
 
@@ -448,6 +509,7 @@ def should_process(msg: dict) -> bool:
         bool(URL_RE.search(msg.get("content", "")))
         or has_audio_attachment(msg)
         or has_image_attachment(msg)
+        or has_pdf_attachment(msg)
         or is_text_drop(msg)
     )
 
@@ -501,6 +563,8 @@ def main():
                             ok = run_ingest_voice(att, msg_id) and ok
                         elif suffix in IMAGE_EXTENSIONS:
                             ok = run_ingest_image(att, msg_id) and ok
+                        elif suffix in PDF_EXTENSIONS:
+                            ok = run_ingest_pdf(att, msg_id) and ok
                     if is_text_drop(msg):
                         ok = run_ingest_text(msg.get("content", "").strip(), msg_id) and ok
                     # Only mark processed if everything succeeded — failures re-queue on next poll
