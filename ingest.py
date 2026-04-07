@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-ingest.py — Background URL ingest processor for Drew's PA system.
+ingest.py — Background ingest processor for Drew's PA system.
 
-Polls the PA Discord channel for URLs, processes them via an LLM (default: Gemini Flash),
-and writes wiki pages to the Obsidian vault — no Claude session required.
+Polls #inbox on Discord for:
+  - URLs       → fetches content → Gemini Flash → wiki page
+  - Voice msgs → faster-whisper (local) → Gemini Flash → wiki note
 
-LLM provider is configured via LLM_PROVIDER in .env:
+No Claude session required. LLM provider is configured via LLM_PROVIDER in .env:
   gemini         — Gemini Flash via OpenAI-compatible endpoint (default)
   openai_compat  — Any OpenAI-compatible API (Ollama, OpenRouter, etc.) via LLM_BASE_URL
 """
@@ -16,12 +17,14 @@ import json
 import time
 import re
 import logging
+import tempfile
 import requests
 from pathlib import Path
 from datetime import datetime
 
 from dotenv import load_dotenv
 from openai import OpenAI
+from faster_whisper import WhisperModel
 
 # Load shared Drew_code/.env (one level up from this repo)
 _env_path = Path(__file__).parent.parent / ".env"
@@ -54,6 +57,21 @@ INGEST_INSTRUCTIONS_PATH = Path(r"C:\Users\drews\Life Org\MD-AI\01 - CLAUDE\Skil
 SCHEMA_PATH              = Path(r"C:\Users\drews\Life Org\Obsidian\6 - Wiki Hub\_schema.md")
 
 URL_RE = re.compile(r'https?://[^\s>]+')
+AUDIO_EXTENSIONS = {'.ogg', '.mp3', '.mp4', '.wav', '.m4a', '.webm'}
+
+# ---------------------------------------------------------------------------
+# Whisper model (lazy-loaded on first voice message)
+# ---------------------------------------------------------------------------
+_whisper_model: WhisperModel | None = None
+
+
+def get_whisper_model() -> WhisperModel:
+    global _whisper_model
+    if _whisper_model is None:
+        model_size = os.getenv("WHISPER_MODEL", "base")
+        log.info(f"Loading Whisper model: {model_size}")
+        _whisper_model = WhisperModel(model_size, device="cpu", compute_type="int8")
+    return _whisper_model
 
 # ---------------------------------------------------------------------------
 # LLM client (provider-agnostic via OpenAI SDK + base_url)
@@ -215,20 +233,10 @@ Rules:
 
 
 # ---------------------------------------------------------------------------
-# Core ingest
+# Core ingest — shared write logic
 # ---------------------------------------------------------------------------
-def run_ingest(url: str, message_id: str):
-    log.info(f"Ingesting: {url}")
-    content = fetch_url_content(url)
-
-    try:
-        raw = call_llm(get_system_prompt(), f"URL: {url}\n\nFetched content (truncated to 8k):\n{content}")
-        result = json.loads(raw)
-    except Exception as e:
-        log.error(f"LLM error for {url}: {e}")
-        post_discord_reply(f"⚠️ Ingest failed for <{url}>: LLM error — {e}", message_id)
-        return
-
+def _apply_ingest_result(result: dict, message_id: str, label: str):
+    """Write files and post reply from a parsed LLM result. Shared by URL and voice paths."""
     ingest_type = result.get("type", "unknown")
 
     if ingest_type == "youtube":
@@ -236,7 +244,7 @@ def run_ingest(url: str, message_id: str):
         queue_path.parent.mkdir(parents=True, exist_ok=True)
         today = datetime.now().strftime("%Y-%m-%d")
         with queue_path.open("a", encoding="utf-8") as f:
-            f.write(f"- [ ] {today} — {url}\n")
+            f.write(f"- [ ] {today} — {label}\n")
         log.info("Queued YouTube URL")
         post_discord_reply(result.get("discord_reply", "Queued for YouTube ingestion."), message_id)
         return
@@ -245,7 +253,6 @@ def run_ingest(url: str, message_id: str):
         post_discord_reply(result.get("discord_reply", "Unsupported content type."), message_id)
         return
 
-    # Write all file operations
     for op in result.get("files", []):
         rel_path = op.get("path", "")
         file_content = op.get("content", "")
@@ -266,20 +273,90 @@ def run_ingest(url: str, message_id: str):
 
         log.info(f"  [{mode}] {rel_path}")
 
-    reply = result.get("discord_reply", f"Ingested: {url}")
-    post_discord_reply(reply, message_id)
-    log.info(f"Done: {result.get('title', url)}")
+    post_discord_reply(result.get("discord_reply", f"Ingested: {label}"), message_id)
+    log.info(f"Done: {result.get('title', label)}")
+
+
+def run_ingest(url: str, message_id: str):
+    log.info(f"Ingesting URL: {url}")
+    content = fetch_url_content(url)
+    try:
+        raw = call_llm(get_system_prompt(), f"URL: {url}\n\nFetched content (truncated to 8k):\n{content}")
+        result = json.loads(raw)
+    except Exception as e:
+        log.error(f"LLM error for {url}: {e}")
+        post_discord_reply(f"⚠️ Ingest failed for <{url}>: LLM error — {e}", message_id)
+        return
+    _apply_ingest_result(result, message_id, url)
+
+
+# ---------------------------------------------------------------------------
+# Voice ingest
+# ---------------------------------------------------------------------------
+def transcribe_attachment(att: dict) -> str:
+    """Download an audio attachment from Discord and transcribe with faster-whisper."""
+    cdn_url = att["url"]
+    suffix = Path(att.get("filename", "audio.ogg")).suffix or ".ogg"
+    log.info(f"Downloading voice attachment: {att.get('filename')}")
+
+    resp = requests.get(cdn_url, headers=_discord_headers(), timeout=30)
+    resp.raise_for_status()
+
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+        tmp.write(resp.content)
+        tmp_path = Path(tmp.name)
+
+    try:
+        segments, _ = get_whisper_model().transcribe(str(tmp_path), language="en")
+        transcript = " ".join(s.text.strip() for s in segments).strip()
+        log.info(f"Transcribed ({len(transcript)} chars): {transcript[:80]}...")
+        return transcript
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
+def run_ingest_voice(att: dict, message_id: str):
+    try:
+        transcript = transcribe_attachment(att)
+    except Exception as e:
+        log.error(f"Transcription failed: {e}")
+        post_discord_reply(f"⚠️ Voice transcription failed: {e}", message_id)
+        return
+
+    if not transcript:
+        post_discord_reply("⚠️ Voice message was empty or couldn't be transcribed.", message_id)
+        return
+
+    try:
+        raw = call_llm(
+            get_system_prompt(),
+            f"Content type: voice transcript (Drew spoke this into #inbox)\n\nTranscript:\n{transcript}",
+        )
+        result = json.loads(raw)
+    except Exception as e:
+        log.error(f"LLM error for voice transcript: {e}")
+        post_discord_reply(f"⚠️ Voice ingest failed: LLM error — {e}", message_id)
+        return
+
+    _apply_ingest_result(result, message_id, f"voice: {att.get('filename', 'message')}")
 
 
 # ---------------------------------------------------------------------------
 # Message filter
 # ---------------------------------------------------------------------------
+def has_audio_attachment(msg: dict) -> bool:
+    return any(
+        Path(a.get("filename", "")).suffix.lower() in AUDIO_EXTENSIONS
+        for a in msg.get("attachments", [])
+    )
+
+
 def should_process(msg: dict) -> bool:
     if msg.get("author", {}).get("bot"):
         return False
     if DREW_USER_ID and msg.get("author", {}).get("id") != DREW_USER_ID:
         return False
-    return bool(URL_RE.search(msg.get("content", "")))
+    return bool(URL_RE.search(msg.get("content", ""))) or has_audio_attachment(msg)
 
 
 # ---------------------------------------------------------------------------
@@ -322,11 +399,15 @@ def main():
                     continue
 
                 if should_process(msg):
-                    urls = URL_RE.findall(msg["content"])
-                    for url in urls:
+                    # URLs
+                    for url in URL_RE.findall(msg.get("content", "")):
                         run_ingest(url, msg_id)
+                    # Voice attachments
+                    for att in msg.get("attachments", []):
+                        if Path(att.get("filename", "")).suffix.lower() in AUDIO_EXTENSIONS:
+                            run_ingest_voice(att, msg_id)
                     state["processed_ids"].append(msg_id)
-                    # Cap the processed list to avoid unbounded growth
+                    # Cap to avoid unbounded growth
                     state["processed_ids"] = state["processed_ids"][-500:]
 
             save_state(state)
