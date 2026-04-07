@@ -82,7 +82,7 @@ _llm_client: OpenAI | None = None
 def get_llm_client() -> OpenAI:
     global _llm_client
     if _llm_client is None:
-        _llm_client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL)
+        _llm_client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL, max_retries=6)
     return _llm_client
 
 
