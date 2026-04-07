@@ -344,6 +344,25 @@ def run_ingest_voice(att: dict, message_id: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Text drop ingest
+# ---------------------------------------------------------------------------
+def run_ingest_text(content: str, message_id: str) -> bool:
+    log.info(f"Ingesting text drop: {content[:80]}")
+    try:
+        raw = call_llm(
+            get_system_prompt(),
+            f"Content type: text drop (Drew typed this into #inbox)\n\nText:\n{content}",
+        )
+        result = json.loads(raw)
+    except Exception as e:
+        log.error(f"LLM error for text drop: {e}")
+        post_discord_reply("⚠️ Text ingest failed: LLM error — will retry next cycle", message_id)
+        return False
+    _apply_ingest_result(result, message_id, f"text: {content[:40]}")
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Message filter
 # ---------------------------------------------------------------------------
 def has_audio_attachment(msg: dict) -> bool:
@@ -353,12 +372,22 @@ def has_audio_attachment(msg: dict) -> bool:
     )
 
 
+def is_text_drop(msg: dict) -> bool:
+    """Plain text message from Drew with no URL and no attachments."""
+    content = msg.get("content", "").strip()
+    return bool(content) and not URL_RE.search(content) and not msg.get("attachments")
+
+
 def should_process(msg: dict) -> bool:
     if msg.get("author", {}).get("bot"):
         return False
     if DREW_USER_ID and msg.get("author", {}).get("id") != DREW_USER_ID:
         return False
-    return bool(URL_RE.search(msg.get("content", ""))) or has_audio_attachment(msg)
+    return (
+        bool(URL_RE.search(msg.get("content", "")))
+        or has_audio_attachment(msg)
+        or is_text_drop(msg)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -407,6 +436,8 @@ def main():
                     for att in msg.get("attachments", []):
                         if Path(att.get("filename", "")).suffix.lower() in AUDIO_EXTENSIONS:
                             ok = run_ingest_voice(att, msg_id) and ok
+                    if is_text_drop(msg):
+                        ok = run_ingest_text(msg.get("content", "").strip(), msg_id) and ok
                     # Only mark processed if everything succeeded — failures re-queue on next poll
                     if ok:
                         state["processed_ids"].append(msg_id)
