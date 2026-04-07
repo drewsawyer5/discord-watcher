@@ -236,17 +236,22 @@ def post_discord_reply(content: str, reference_message_id: str):
 # URL content fetch
 # ---------------------------------------------------------------------------
 def fetch_url_content(url: str) -> str:
-    """Fetch URL and return stripped text (best-effort, capped at 8k chars)."""
+    """Fetch URL and extract main text via trafilatura. Returns full text (no cap — callers cap for LLM)."""
     try:
-        resp = requests.get(
-            url,
-            timeout=12,
-            headers={"User-Agent": "Mozilla/5.0 (compatible; DrewPA/1.0)"},
-        )
+        import trafilatura
+        downloaded = trafilatura.fetch_url(url)
+        if downloaded:
+            text = trafilatura.extract(downloaded, include_comments=False, include_tables=True)
+            if text:
+                log.info(f"trafilatura extracted {len(text)} chars from {url}")
+                return text
+        # Fallback: regex strip if trafilatura returns nothing
+        log.warning(f"trafilatura returned empty for {url} — falling back to regex strip")
+        resp = requests.get(url, timeout=12, headers={"User-Agent": "Mozilla/5.0 (compatible; DrewPA/1.0)"})
         resp.raise_for_status()
         text = re.sub(r'<[^>]+>', ' ', resp.text)
         text = re.sub(r'\s+', ' ', text).strip()
-        return text[:8000]
+        return text
     except Exception as e:
         log.warning(f"Fetch failed for {url}: {e}")
         return f"[Fetch failed: {e}]"
@@ -353,15 +358,22 @@ def _apply_ingest_result(result: dict, message_id: str, label: str):
     log.info(f"Done: {result.get('title', label)}")
 
 
+LLM_URL_CAP = 25_000  # chars passed to LLM for URL content
+
+
 def run_ingest(url: str, message_id: str) -> bool:
     log.info(f"Ingesting URL: {url}")
     content = fetch_url_content(url)
+    # Raw gets full text; LLM gets capped version
     raw_path = write_raw_md("urls", url, content, extra_fm={"url": url})
     raw_rel = vault_rel(raw_path)
+    llm_content = content[:LLM_URL_CAP]
+    truncated = len(content) > LLM_URL_CAP
+    truncation_note = f"\n\n[Content truncated at {LLM_URL_CAP} chars — full text in raw file]" if truncated else ""
     try:
         raw = call_llm(
             get_system_prompt(),
-            f"URL: {url}\nRaw file: [[{raw_rel}]]\n\nFetched content (truncated to 8k):\n{content}",
+            f"URL: {url}\nRaw file: [[{raw_rel}]]\n\nFetched content:{truncation_note}\n{llm_content}",
         )
         result = json.loads(raw)
     except Exception as e:
