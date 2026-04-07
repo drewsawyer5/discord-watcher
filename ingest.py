@@ -18,6 +18,7 @@ import time
 import re
 import base64
 import logging
+import logging.handlers
 import tempfile
 import requests
 from pathlib import Path
@@ -37,6 +38,10 @@ if sys.stderr.encoding != "utf-8":
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+_log_file = Path(__file__).parent / "ingest.log"
+logging.getLogger().addHandler(
+    logging.handlers.RotatingFileHandler(_log_file, maxBytes=1_000_000, backupCount=2, encoding="utf-8")
+)
 log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
