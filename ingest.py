@@ -124,6 +124,55 @@ def call_llm_with_image(system: str, user_text: str, image_b64: str, mime_type: 
 
 
 # ---------------------------------------------------------------------------
+# Raw storage helpers
+# ---------------------------------------------------------------------------
+def _slug(s: str, max_len: int = 50) -> str:
+    s = re.sub(r'^https?://', '', s)  # strip URL scheme
+    return re.sub(r'[^\w-]', '-', s)[:max_len].strip('-').lower()
+
+
+def _fm_val(v) -> str:
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    s = str(v)
+    if any(c in s for c in ':#[]{}>|'):
+        return f'"{s}"'
+    return s
+
+
+def _raw_dir(content_type: str) -> Path:
+    d = VAULT_PATH / "5 - Storage" / "05 - Raw Ingests" / content_type
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def vault_rel(path: Path) -> str:
+    return str(path.relative_to(VAULT_PATH)).replace("\\", "/")
+
+
+def write_raw_md(content_type: str, slug: str, body: str, extra_fm: dict | None = None) -> Path:
+    """Write frontmatter + body to 5 - Storage/05 - Raw Ingests/{type}/YYYY-MM-DD-{slug}.md."""
+    today = datetime.now().strftime("%Y-%m-%d")
+    raw_path = _raw_dir(content_type) / f"{today}-{_slug(slug)}.md"
+    fm = {"date": today, "type": content_type, "processed": False}
+    if extra_fm:
+        fm.update(extra_fm)
+    lines = ["---"] + [f"{k}: {_fm_val(v)}" for k, v in fm.items()] + ["---", "", body.strip()]
+    raw_path.write_text("\n".join(lines), encoding="utf-8")
+    log.info(f"  [raw] {vault_rel(raw_path)}")
+    return raw_path
+
+
+def write_raw_binary(content_type: str, filename: str, data: bytes) -> Path:
+    """Save binary file to 5 - Storage/05 - Raw Ingests/{type}/{filename}."""
+    today = datetime.now().strftime("%Y-%m-%d")
+    raw_path = _raw_dir(content_type) / f"{today}-{filename}"
+    raw_path.write_bytes(data)
+    log.info(f"  [raw-bin] {vault_rel(raw_path)}")
+    return raw_path
+
+
+# ---------------------------------------------------------------------------
 # State — tracks last seen message ID so restarts don't re-process
 # ---------------------------------------------------------------------------
 def load_state() -> dict:
@@ -254,6 +303,7 @@ Rules:
 - For youtube: set files=[] and discord_reply="Queued for YouTube ingestion (not yet built)."
 - For unsupported (non-image attachment, unknown file type): set files=[] and discord_reply="Unsupported file type — drop via Claude session."
 - discord_reply must be 4 lines or fewer
+- If the user message contains "Raw file: [[path]]", add "- **Raw:** [[path]]" to the ## Metadata section of all wiki pages being created (not to _log.md or _index.md appends)
 """
     return _system_prompt
 
@@ -306,8 +356,13 @@ def _apply_ingest_result(result: dict, message_id: str, label: str):
 def run_ingest(url: str, message_id: str) -> bool:
     log.info(f"Ingesting URL: {url}")
     content = fetch_url_content(url)
+    raw_path = write_raw_md("urls", url, content, extra_fm={"url": url})
+    raw_rel = vault_rel(raw_path)
     try:
-        raw = call_llm(get_system_prompt(), f"URL: {url}\n\nFetched content (truncated to 8k):\n{content}")
+        raw = call_llm(
+            get_system_prompt(),
+            f"URL: {url}\nRaw file: [[{raw_rel}]]\n\nFetched content (truncated to 8k):\n{content}",
+        )
         result = json.loads(raw)
     except Exception as e:
         log.error(f"LLM error for {url}: {e}")
@@ -354,10 +409,14 @@ def run_ingest_voice(att: dict, message_id: str) -> bool:
         post_discord_reply("⚠️ Voice message was empty or couldn't be transcribed.", message_id)
         return True  # not an LLM failure — don't re-queue
 
+    filename = att.get("filename", "voice.ogg")
+    raw_path = write_raw_md("voice", Path(filename).stem, transcript, extra_fm={"filename": filename})
+    raw_rel = vault_rel(raw_path)
+
     try:
         raw = call_llm(
             get_system_prompt(),
-            f"Content type: voice transcript (Drew spoke this into #inbox)\n\nTranscript:\n{transcript}",
+            f"Content type: voice transcript (Drew spoke this into #inbox)\nRaw file: [[{raw_rel}]]\n\nTranscript:\n{transcript}",
         )
         result = json.loads(raw)
     except Exception as e:
@@ -365,7 +424,7 @@ def run_ingest_voice(att: dict, message_id: str) -> bool:
         post_discord_reply(f"⚠️ Voice ingest failed: LLM error — will retry next cycle", message_id)
         return False
 
-    _apply_ingest_result(result, message_id, f"voice: {att.get('filename', 'message')}")
+    _apply_ingest_result(result, message_id, f"voice: {filename}")
     return True
 
 
@@ -374,10 +433,12 @@ def run_ingest_voice(att: dict, message_id: str) -> bool:
 # ---------------------------------------------------------------------------
 def run_ingest_text(content: str, message_id: str) -> bool:
     log.info(f"Ingesting text drop: {content[:80]}")
+    raw_path = write_raw_md("text", content[:40], content)
+    raw_rel = vault_rel(raw_path)
     try:
         raw = call_llm(
             get_system_prompt(),
-            f"Content type: text drop (Drew typed this into #inbox)\n\nText:\n{content}",
+            f"Content type: text drop (Drew typed this into #inbox)\nRaw file: [[{raw_rel}]]\n\nText:\n{content}",
         )
         result = json.loads(raw)
     except Exception as e:
@@ -400,16 +461,20 @@ def run_ingest_image(att: dict, message_id: str) -> bool:
     try:
         resp = requests.get(att["url"], headers=_discord_headers(), timeout=30)
         resp.raise_for_status()
-        image_b64 = base64.b64encode(resp.content).decode("utf-8")
     except Exception as e:
         log.error(f"Image download failed: {e}")
         post_discord_reply(f"⚠️ Image download failed: {e}", message_id)
         return False
 
+    # Save raw binary before LLM call
+    raw_bin_path = write_raw_binary("images", filename, resp.content)
+    raw_bin_rel = vault_rel(raw_bin_path)
+    image_b64 = base64.b64encode(resp.content).decode("utf-8")
+
     try:
         raw = call_llm_with_image(
             get_system_prompt(),
-            f"Content type: image attachment (Drew dropped this into #inbox)\nFilename: {filename}\n\nDescribe and classify this image for the wiki.",
+            f"Content type: image attachment (Drew dropped this into #inbox)\nFilename: {filename}\nRaw file: [[{raw_bin_rel}]]\n\nDescribe and classify this image for the wiki.",
             image_b64,
             mime_type,
         )
@@ -418,6 +483,11 @@ def run_ingest_image(att: dict, message_id: str) -> bool:
         log.error(f"LLM error for image {filename}: {e}")
         post_discord_reply("⚠️ Image ingest failed: LLM error — will retry next cycle", message_id)
         return False
+
+    # Write sidecar .md with LLM description alongside the binary
+    sidecar_body = f"![[{raw_bin_rel}]]\n\n{result.get('discord_reply', '').strip()}"
+    write_raw_md("images", Path(filename).stem, sidecar_body,
+                 extra_fm={"filename": filename, "raw_binary": raw_bin_rel})
 
     _apply_ingest_result(result, message_id, f"image: {filename}")
     return True
@@ -440,6 +510,10 @@ def run_ingest_pdf(att: dict, message_id: str) -> bool:
         post_discord_reply(f"⚠️ PDF download failed: {e}", message_id)
         return False
 
+    # Save raw PDF binary before extraction
+    raw_bin_path = write_raw_binary("pdfs", filename, resp.content)
+    raw_bin_rel = vault_rel(raw_bin_path)
+
     try:
         with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
             tmp.write(resp.content)
@@ -461,10 +535,15 @@ def run_ingest_pdf(att: dict, message_id: str) -> bool:
         )
         return True  # Not a retry-able failure
 
+    # Save full extracted text to raw ingests (no truncation)
+    raw_text_path = write_raw_md("pdfs", Path(filename).stem, text,
+                                  extra_fm={"filename": filename, "pdf": raw_bin_rel})
+    raw_text_rel = vault_rel(raw_text_path)
+
     try:
         raw = call_llm(
             get_system_prompt(),
-            f"Content type: PDF attachment (Drew dropped this into #inbox)\nFilename: {filename}\n\nExtracted text (capped at 12k):\n{text[:12000]}",
+            f"Content type: PDF attachment (Drew dropped this into #inbox)\nFilename: {filename}\nRaw file: [[{raw_text_rel}]]\n\nExtracted text (capped at 50k):\n{text[:50000]}",
         )
         result = json.loads(raw)
     except Exception as e:
