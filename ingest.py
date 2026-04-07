@@ -231,7 +231,7 @@ Vault root: C:\\Users\\drews\\Life Org\\Obsidian
 ## Output Format
 Return a single JSON object:
 {{
-  "type": "article | paper | list_item | note | youtube | unsupported",
+  "type": "article | paper | list_item | note | image | youtube | unsupported",
   "title": "human-readable title",
   "files": [
     {{
@@ -250,8 +250,9 @@ Rules:
 - Always include _index.md append (one row in the relevant table)
 - For list items: append one line to the correct Lists/ page; set mode "append"
 - For list pages that may not exist: set mode "create" with full page content including the Queue header, then the one item
+- For image: describe what's in the image, write a note to 6 - Wiki Hub/ in the appropriate section, include _log.md and _index.md appends as usual
 - For youtube: set files=[] and discord_reply="Queued for YouTube ingestion (not yet built)."
-- For unsupported (PDF, attachment): set files=[] and discord_reply="PDF ingestion not supported yet — drop via Claude session."
+- For unsupported (non-image attachment, unknown file type): set files=[] and discord_reply="Unsupported file type — drop via Claude session."
 - discord_reply must be 4 lines or fewer
 """
     return _system_prompt
