@@ -340,6 +340,17 @@ Rules:
     return _system_prompt
 
 
+def get_existing_lists_context() -> str:
+    """Tell the LLM which list files already exist so it uses append, not create."""
+    lists_dir = VAULT_PATH / "6 - Wiki Hub" / "Lists"
+    if not lists_dir.exists():
+        return ""
+    existing = sorted(f.name for f in lists_dir.glob("*.md"))
+    if not existing:
+        return ""
+    return f"\nExisting list files (MUST use mode 'append' for these, never 'create'): {', '.join(existing)}"
+
+
 # ---------------------------------------------------------------------------
 # Core ingest — shared write logic
 # ---------------------------------------------------------------------------
@@ -383,7 +394,7 @@ def _apply_ingest_result(result: dict, message_id: str, label: str):
 
         if mode == "append":
             with path.open("a", encoding="utf-8") as f:
-                f.write("\n" + file_content.rstrip() + "\n")
+                f.write(file_content.rstrip() + "\n")
         else:
             path.write_text(file_content, encoding="utf-8")
 
@@ -408,7 +419,7 @@ def run_ingest(url: str, message_id: str) -> bool:
     try:
         raw = call_llm(
             get_system_prompt(),
-            f"URL: {url}\nRaw file: [[{raw_rel}]]\n\nFetched content:{truncation_note}\n{llm_content}",
+            f"URL: {url}\nRaw file: [[{raw_rel}]]{get_existing_lists_context()}\n\nFetched content:{truncation_note}\n{llm_content}",
         )
         result = json.loads(raw)
     except Exception as e:
@@ -463,7 +474,7 @@ def run_ingest_voice(att: dict, message_id: str) -> bool:
     try:
         raw = call_llm(
             get_system_prompt(),
-            f"Content type: voice transcript (Drew spoke this into #inbox)\nRaw file: [[{raw_rel}]]\n\nTranscript:\n{transcript}",
+            f"Content type: voice transcript (Drew spoke this into #inbox)\nRaw file: [[{raw_rel}]]{get_existing_lists_context()}\n\nTranscript:\n{transcript}",
         )
         result = json.loads(raw)
     except Exception as e:
@@ -485,7 +496,7 @@ def run_ingest_text(content: str, message_id: str) -> bool:
     try:
         raw = call_llm(
             get_system_prompt(),
-            f"Content type: text drop (Drew typed this into #inbox)\nRaw file: [[{raw_rel}]]\n\nText:\n{content}",
+            f"Content type: text drop (Drew typed this into #inbox)\nRaw file: [[{raw_rel}]]{get_existing_lists_context()}\n\nText:\n{content}",
         )
         result = json.loads(raw)
     except Exception as e:
@@ -521,7 +532,7 @@ def run_ingest_image(att: dict, message_id: str) -> bool:
     try:
         raw = call_llm_with_image(
             get_system_prompt(),
-            f"Content type: image attachment (Drew dropped this into #inbox)\nFilename: {filename}\nRaw file: [[{raw_bin_rel}]]\n\nDescribe and classify this image for the wiki.",
+            f"Content type: image attachment (Drew dropped this into #inbox)\nFilename: {filename}\nRaw file: [[{raw_bin_rel}]]{get_existing_lists_context()}\n\nDescribe and classify this image for the wiki.",
             image_b64,
             mime_type,
         )
@@ -590,7 +601,7 @@ def run_ingest_pdf(att: dict, message_id: str) -> bool:
     try:
         raw = call_llm(
             get_system_prompt(),
-            f"Content type: PDF attachment (Drew dropped this into #inbox)\nFilename: {filename}\nRaw file: [[{raw_text_rel}]]\n\nExtracted text (capped at 50k):\n{text[:50000]}",
+            f"Content type: PDF attachment (Drew dropped this into #inbox)\nFilename: {filename}\nRaw file: [[{raw_text_rel}]]{get_existing_lists_context()}\n\nExtracted text (capped at 50k):\n{text[:50000]}",
         )
         result = json.loads(raw)
     except Exception as e:
