@@ -232,6 +232,29 @@ def post_discord_reply(content: str, reference_message_id: str):
     )
 
 
+def post_discord_message(content: str, channel_id: str | None = None):
+    """Post a standalone message to a Discord channel (no reply reference)."""
+    discord_post(f"/channels/{channel_id or INGEST_CHANNEL_ID}/messages", {"content": content})
+
+
+# Digest notification — /digest writes this file; we pick it up and send via bot
+DIGEST_NOTIFY_FILE = VAULT_PATH.parent / "MD-AI" / "digest-notify-pending.md"
+
+
+def check_digest_notify():
+    """Send pending digest notification if one was written by /digest, then delete it."""
+    if not DIGEST_NOTIFY_FILE.exists():
+        return
+    try:
+        text = DIGEST_NOTIFY_FILE.read_text(encoding="utf-8").strip()
+        if text:
+            post_discord_message(text)
+            log.info("Sent pending digest notification to Discord")
+        DIGEST_NOTIFY_FILE.unlink()
+    except Exception as e:
+        log.error(f"Failed to send digest notification: {e}")
+
+
 # ---------------------------------------------------------------------------
 # URL content fetch
 # ---------------------------------------------------------------------------
@@ -300,7 +323,10 @@ Return a single JSON object:
 Rules:
 - mode "create": write full content to file (overwrite if exists)
 - mode "append": append content as a new line at end of file
-- Always include _log.md append (one row)
+- Always include _log.md append. The file already has a header row — append exactly one bare data row with NO extra formatting, NO table headers, NO blank lines before or after it:
+  | YYYY-MM-DD | {type} | {title} | {source_url or "attachment" or "text"} | {wiki_page_path} |
+  Example: | 2026-04-09 | article | My Title | https://example.com | 6 - Wiki Hub/Sources/My-Title.md |
+  Types: article, paper, list_item, note, image, voice
 - Always include _index.md append (one row in the relevant table)
 - For list items: append one line to the correct Lists/ page; set mode "append"
 - For list pages that may not exist: set mode "create" with full page content including the Queue header, then the one item
@@ -648,6 +674,7 @@ def main():
 
     while True:
         try:
+            check_digest_notify()
             messages = fetch_new_messages(state["last_message_id"])
             for msg in messages:
                 msg_id = msg["id"]
