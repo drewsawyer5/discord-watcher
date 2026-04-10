@@ -252,6 +252,36 @@ def post_discord_message(content: str, channel_id: str | None = None):
 # Digest notification — /digest writes this file; we pick it up and send via bot
 DIGEST_NOTIFY_FILE = VAULT_PATH.parent / "MD-AI" / "digest-notify-pending.md"
 
+# Retry queue — items that failed to fully process (fetch blocked or LLM down)
+RETRY_QUEUE_FILE = VAULT_PATH / "6 - Wiki Hub" / "_retry_queue.md"
+
+
+def _in_retry_queue(source: str) -> bool:
+    """Check if this source already has an entry in the retry queue (prevents duplicates)."""
+    if not RETRY_QUEUE_FILE.exists():
+        return False
+    return source in RETRY_QUEUE_FILE.read_text(encoding="utf-8")
+
+
+def write_retry_queue_entry(fail_type: str, source: str, raw_path: str = ""):
+    """Append a failed ingest entry to _retry_queue.md. Skips if source already present."""
+    if _in_retry_queue(source):
+        return
+    if not RETRY_QUEUE_FILE.exists():
+        RETRY_QUEUE_FILE.write_text(
+            "# Ingest Retry Queue\n\n"
+            "> lm_failed = LLM was down; raw content is saved and re-processable.\n"
+            "> fetch_failed = URL was blocked (403/paywall); no content saved. Needs manual handling.\n"
+            "> /digest reads this file in Step 0 and either retries or surfaces to Drew.\n\n"
+            "| Date | Type | Source | Raw File |\n"
+            "|---|---|---|---|\n",
+            encoding="utf-8",
+        )
+    today = datetime.now().strftime("%Y-%m-%d")
+    with RETRY_QUEUE_FILE.open("a", encoding="utf-8") as f:
+        f.write(f"| {today} | {fail_type} | {source} | {raw_path} |\n")
+    log.info(f"[retry_queue] {fail_type}: {source}")
+
 
 def check_digest_notify():
     """Send pending digest notification if one was written by /digest, then delete it."""
@@ -425,6 +455,14 @@ def run_ingest(url: str, message_id: str) -> bool:
     # Raw gets full text; LLM gets capped version
     raw_path = write_raw_md("urls", url, content, extra_fm={"url": url})
     raw_rel = vault_rel(raw_path)
+
+    # Fetch failed permanently (403, paywall, etc.) — skip LLM, log for manual recovery
+    if content.startswith("[Fetch failed:"):
+        write_retry_queue_entry("fetch_failed", url, raw_rel)
+        log.info(f"Fetch failed for {url} — logged to retry queue, skipping LLM")
+        post_discord_reply(f"⚠️ Could not fetch <{url}> (blocked/403) — logged to retry queue for manual handling.", message_id)
+        return True  # Not a retryable LLM failure — don't add to failed_ids
+
     llm_content = content[:LLM_URL_CAP]
     truncated = len(content) > LLM_URL_CAP
     truncation_note = f"\n\n[Content truncated at {LLM_URL_CAP} chars — full text in raw file]" if truncated else ""
@@ -436,6 +474,7 @@ def run_ingest(url: str, message_id: str) -> bool:
         result = json.loads(raw)
     except Exception as e:
         log.error(f"LLM error for {url}: {e}")
+        write_retry_queue_entry("lm_failed", url, raw_rel)
         post_discord_reply(f"⚠️ Ingest failed for <{url}>: LLM error — will retry next cycle", message_id)
         return False
     _apply_ingest_result(result, message_id, url)
@@ -491,6 +530,7 @@ def run_ingest_voice(att: dict, message_id: str) -> bool:
         result = json.loads(raw)
     except Exception as e:
         log.error(f"LLM error for voice transcript: {e}")
+        write_retry_queue_entry("lm_failed", f"voice:{filename}", raw_rel)
         post_discord_reply(f"⚠️ Voice ingest failed: LLM error — will retry next cycle", message_id)
         return False
 
@@ -513,6 +553,7 @@ def run_ingest_text(content: str, message_id: str) -> bool:
         result = json.loads(raw)
     except Exception as e:
         log.error(f"LLM error for text drop: {e}")
+        write_retry_queue_entry("lm_failed", f"text:{content[:60]}", raw_rel)
         post_discord_reply("⚠️ Text ingest failed: LLM error — will retry next cycle", message_id)
         return False
     _apply_ingest_result(result, message_id, f"text: {content[:40]}")
@@ -551,6 +592,7 @@ def run_ingest_image(att: dict, message_id: str) -> bool:
         result = json.loads(raw)
     except Exception as e:
         log.error(f"LLM error for image {filename}: {e}")
+        write_retry_queue_entry("lm_failed", f"image:{filename}", raw_bin_rel)
         post_discord_reply("⚠️ Image ingest failed: LLM error — will retry next cycle", message_id)
         return False
 
@@ -618,6 +660,7 @@ def run_ingest_pdf(att: dict, message_id: str) -> bool:
         result = json.loads(raw)
     except Exception as e:
         log.error(f"LLM error for PDF {filename}: {e}")
+        write_retry_queue_entry("lm_failed", f"pdf:{filename}", raw_text_rel)
         post_discord_reply("⚠️ PDF ingest failed: LLM error — will retry next cycle", message_id)
         return False
 
