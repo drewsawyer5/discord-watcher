@@ -339,14 +339,14 @@ Rules:
   | YYYY-MM-DD | {{type}} | {{title}} | {{source_url or "attachment" or "text"}} | {{wiki_page_path}} |
   Example: | 2026-04-09 | article | My Title | https://example.com | 6 - Wiki Hub/Sources/My-Title.md |
   Types: article, paper, list_item, note, image, voice
-- Always include _index.md append (one row in the relevant table)
+- Do NOT touch _index.md — /digest owns and rebuilds that file
 - For list items: append one line to the correct Lists/ page; set mode "append"
 - For list pages that may not exist: set mode "create" with full page content including the Queue header, then the one item
-- For image: describe what's in the image, write a note to 6 - Wiki Hub/ in the appropriate section, include _log.md and _index.md appends as usual
+- For image: describe what's in the image, write a note to 6 - Wiki Hub/ in the appropriate section, include _log.md append as usual
 - For youtube: set files=[] and discord_reply="Queued for YouTube ingestion (not yet built)."
 - For unsupported (non-image attachment, unknown file type): set files=[] and discord_reply="Unsupported file type — drop via Claude session."
 - discord_reply must be 4 lines or fewer
-- If the user message contains "Raw file: [[path]]", add "- **Raw:** [[path]]" to the ## Metadata section of all wiki pages being created (not to _log.md or _index.md appends)
+- If the user message contains "Raw file: [[path]]", add "- **Raw:** [[path]]" to the ## Metadata section of all wiki pages being created (not to _log.md)
 - NEVER include paths under "5 - Storage/05 - Raw Ingests/" in the files[] array — those files are already written by the system before your call and must not be overwritten
 """
     return _system_prompt
