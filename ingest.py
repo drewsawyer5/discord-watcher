@@ -177,8 +177,11 @@ def write_raw_binary(content_type: str, filename: str, data: bytes) -> Path:
 # ---------------------------------------------------------------------------
 def load_state() -> dict:
     if STATE_FILE.exists():
-        return json.loads(STATE_FILE.read_text(encoding="utf-8"))
-    return {"last_message_id": None, "processed_ids": []}
+        state = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+        if "failed_ids" not in state:
+            state["failed_ids"] = {}  # migrate old state
+        return state
+    return {"last_message_id": None, "processed_ids": [], "failed_ids": {}}
 
 
 def save_state(state: dict):
@@ -211,6 +214,15 @@ def discord_post(endpoint: str, payload: dict) -> dict:
     )
     resp.raise_for_status()
     return resp.json()
+
+
+def discord_get_message(message_id: str) -> dict | None:
+    """Fetch a single message by ID for retry processing."""
+    try:
+        return discord_get(f"/channels/{INGEST_CHANNEL_ID}/messages/{message_id}")
+    except Exception as e:
+        log.warning(f"Could not fetch message {message_id}: {e}")
+        return None
 
 
 def fetch_new_messages(after_id: str | None) -> list[dict]:
@@ -657,6 +669,34 @@ def should_process(msg: dict) -> bool:
     )
 
 
+MAX_RETRIES = 5
+
+
+def _process_message(msg: dict) -> bool:
+    """Run all ingest handlers for a message. Returns True only if everything succeeded."""
+    msg_id = msg["id"]
+    ok = True
+    for url in URL_RE.findall(msg.get("content", "")):
+        ok = run_ingest(url, msg_id) and ok
+    for att in msg.get("attachments", []):
+        suffix = Path(att.get("filename", "")).suffix.lower()
+        if suffix in AUDIO_EXTENSIONS:
+            ok = run_ingest_voice(att, msg_id) and ok
+        elif suffix in IMAGE_EXTENSIONS:
+            ok = run_ingest_image(att, msg_id) and ok
+        elif suffix in PDF_EXTENSIONS:
+            ok = run_ingest_pdf(att, msg_id) and ok
+    if is_text_drop(msg):
+        ok = run_ingest_text(msg.get("content", "").strip(), msg_id) and ok
+    return ok
+
+
+def _mark_processed(state: dict, msg_id: str):
+    state["processed_ids"].append(msg_id)
+    state["processed_ids"] = state["processed_ids"][-500:]
+    state["failed_ids"].pop(msg_id, None)
+
+
 # ---------------------------------------------------------------------------
 # Main loop
 # ---------------------------------------------------------------------------
@@ -686,6 +726,26 @@ def main():
     while True:
         try:
             check_digest_notify()
+
+            # Retry previously failed messages before processing new ones
+            for msg_id, attempts in list(state["failed_ids"].items()):
+                if attempts >= MAX_RETRIES:
+                    log.warning(f"Message {msg_id} exceeded {MAX_RETRIES} retries — dropping")
+                    _mark_processed(state, msg_id)
+                    continue
+                msg = discord_get_message(msg_id)
+                if not msg or not should_process(msg):
+                    log.warning(f"Could not re-fetch or no longer processable: {msg_id} — dropping")
+                    _mark_processed(state, msg_id)
+                    continue
+                if _process_message(msg):
+                    log.info(f"Retry succeeded for message {msg_id} (attempt {attempts + 1})")
+                    _mark_processed(state, msg_id)
+                else:
+                    state["failed_ids"][msg_id] = attempts + 1
+                    log.info(f"Retry {attempts + 1}/{MAX_RETRIES} failed for message {msg_id}")
+
+            # Process new messages
             messages = fetch_new_messages(state["last_message_id"])
             for msg in messages:
                 msg_id = msg["id"]
@@ -694,29 +754,15 @@ def main():
                 if not state["last_message_id"] or int(msg_id) > int(state["last_message_id"]):
                     state["last_message_id"] = msg_id
 
-                if msg_id in state["processed_ids"]:
+                if msg_id in state["processed_ids"] or msg_id in state["failed_ids"]:
                     continue
 
                 if should_process(msg):
-                    ok = True
-                    for url in URL_RE.findall(msg.get("content", "")):
-                        ok = run_ingest(url, msg_id) and ok
-                    for att in msg.get("attachments", []):
-                        suffix = Path(att.get("filename", "")).suffix.lower()
-                        if suffix in AUDIO_EXTENSIONS:
-                            ok = run_ingest_voice(att, msg_id) and ok
-                        elif suffix in IMAGE_EXTENSIONS:
-                            ok = run_ingest_image(att, msg_id) and ok
-                        elif suffix in PDF_EXTENSIONS:
-                            ok = run_ingest_pdf(att, msg_id) and ok
-                    if is_text_drop(msg):
-                        ok = run_ingest_text(msg.get("content", "").strip(), msg_id) and ok
-                    # Only mark processed if everything succeeded — failures re-queue on next poll
-                    if ok:
-                        state["processed_ids"].append(msg_id)
-                        state["processed_ids"] = state["processed_ids"][-500:]
+                    if _process_message(msg):
+                        _mark_processed(state, msg_id)
                     else:
-                        log.info(f"Message {msg_id} will be retried next poll cycle")
+                        state["failed_ids"][msg_id] = 1
+                        log.info(f"Message {msg_id} queued for retry (1/{MAX_RETRIES})")
 
             save_state(state)
 
