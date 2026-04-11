@@ -73,7 +73,7 @@ try {
     } else {
         Write-Log "claude NOT running - restarting"
         Start-Process -FilePath $claudeExe `
-            -ArgumentList "--dangerously-skip-permissions --channels plugin:discord@claude-plugins-official" `
+            -ArgumentList "--permission-mode bypassPermissions --channels plugin:discord@claude-plugins-official" `
             -WorkingDirectory $claudeDir `
             -WindowStyle Normal
         Write-Log "claude start issued"
