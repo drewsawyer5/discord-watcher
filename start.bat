@@ -5,4 +5,4 @@
 start "discord-watcher" /min python "C:\Users\drews\Life Org\Drew_code\discord-watcher\watcher.py"
 
 :: Start Claude Discord channel session
-start "claude-discord" /min claude --dangerously-skip-permissions --channels plugin:discord@claude-plugins-official
+start "claude-discord" /min claude --permission-mode auto --channels plugin:discord@claude-plugins-official
