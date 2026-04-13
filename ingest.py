@@ -456,7 +456,7 @@ def _apply_ingest_result(result: dict, message_id: str, label: str):
 LLM_URL_CAP = 25_000  # chars passed to LLM for URL content
 
 
-def run_ingest(url: str, message_id: str) -> bool:
+def run_ingest(url: str, message_id: str, drew_context: str = "") -> bool:
     log.info(f"Ingesting URL: {url}")
     content = fetch_url_content(url)
     # Raw gets full text; LLM gets capped version
@@ -473,10 +473,11 @@ def run_ingest(url: str, message_id: str) -> bool:
     llm_content = content[:LLM_URL_CAP]
     truncated = len(content) > LLM_URL_CAP
     truncation_note = f"\n\n[Content truncated at {LLM_URL_CAP} chars — full text in raw file]" if truncated else ""
+    context_note = f"\nDrew's note: {drew_context}" if drew_context else ""
     try:
         raw = call_llm(
             get_system_prompt(),
-            f"URL: {url}\nRaw file: [[{raw_rel}]]{get_existing_lists_context()}\n\nFetched content:{truncation_note}\n{llm_content}",
+            f"URL: {url}\nRaw file: [[{raw_rel}]]{context_note}{get_existing_lists_context()}\n\nFetched content:{truncation_note}\n{llm_content}",
         )
         result = json.loads(raw)
     except Exception as e:
@@ -570,7 +571,7 @@ def run_ingest_text(content: str, message_id: str) -> bool:
 # ---------------------------------------------------------------------------
 # Image ingest
 # ---------------------------------------------------------------------------
-def run_ingest_image(att: dict, message_id: str) -> bool:
+def run_ingest_image(att: dict, message_id: str, drew_context: str = "") -> bool:
     filename = att.get("filename", "image.jpg")
     suffix = Path(filename).suffix.lower()
     mime_type = IMAGE_MIME.get(suffix, "image/jpeg")
@@ -589,10 +590,11 @@ def run_ingest_image(att: dict, message_id: str) -> bool:
     raw_bin_rel = vault_rel(raw_bin_path)
     image_b64 = base64.b64encode(resp.content).decode("utf-8")
 
+    context_note = f"\nDrew's note: {drew_context}" if drew_context else ""
     try:
         raw = call_llm_with_image(
             get_system_prompt(),
-            f"Content type: image attachment (Drew dropped this into #inbox)\nFilename: {filename}\nRaw file: [[{raw_bin_rel}]]{get_existing_lists_context()}\n\nDescribe and classify this image for the wiki.",
+            f"Content type: image attachment (Drew dropped this into #inbox)\nFilename: {filename}\nRaw file: [[{raw_bin_rel}]]{context_note}{get_existing_lists_context()}\n\nDescribe and classify this image for the wiki.",
             image_b64,
             mime_type,
         )
@@ -615,7 +617,7 @@ def run_ingest_image(att: dict, message_id: str) -> bool:
 # ---------------------------------------------------------------------------
 # PDF ingest
 # ---------------------------------------------------------------------------
-def run_ingest_pdf(att: dict, message_id: str) -> bool:
+def run_ingest_pdf(att: dict, message_id: str, drew_context: str = "") -> bool:
     import pdfplumber
 
     filename = att.get("filename", "document.pdf")
@@ -662,7 +664,9 @@ def run_ingest_pdf(att: dict, message_id: str) -> bool:
     try:
         raw = call_llm(
             get_system_prompt(),
-            f"Content type: PDF attachment (Drew dropped this into #inbox)\nFilename: {filename}\nRaw file: [[{raw_text_rel}]]{get_existing_lists_context()}\n\nExtracted text (capped at 50k):\n{text[:50000]}",
+            f"Content type: PDF attachment (Drew dropped this into #inbox)\nFilename: {filename}\nRaw file: [[{raw_text_rel}]]"
+            + (f"\nDrew's note: {drew_context}" if drew_context else "")
+            + f"{get_existing_lists_context()}\n\nExtracted text (capped at 50k):\n{text[:50000]}",
         )
         result = json.loads(raw)
     except Exception as e:
@@ -837,18 +841,23 @@ def _process_message(msg: dict) -> bool:
     """Run all ingest handlers for a message. Returns True only if everything succeeded."""
     msg_id = msg["id"]
     ok = True
-    for url in URL_RE.findall(msg.get("content", "")):
-        ok = run_ingest(url, msg_id) and ok
+    full_content = msg.get("content", "")
+
+    # Extract Drew's context: message text with URLs stripped (preserved for URL/image/PDF ingest)
+    drew_context = URL_RE.sub("", full_content).strip()
+
+    for url in URL_RE.findall(full_content):
+        ok = run_ingest(url, msg_id, drew_context=drew_context) and ok
     for att in msg.get("attachments", []):
         suffix = Path(att.get("filename", "")).suffix.lower()
         if suffix in AUDIO_EXTENSIONS:
             ok = run_ingest_voice(att, msg_id) and ok
         elif suffix in IMAGE_EXTENSIONS:
-            ok = run_ingest_image(att, msg_id) and ok
+            ok = run_ingest_image(att, msg_id, drew_context=drew_context) and ok
         elif suffix in PDF_EXTENSIONS:
-            ok = run_ingest_pdf(att, msg_id) and ok
+            ok = run_ingest_pdf(att, msg_id, drew_context=drew_context) and ok
     if is_text_drop(msg):
-        ok = run_ingest_text(msg.get("content", "").strip(), msg_id) and ok
+        ok = run_ingest_text(full_content.strip(), msg_id) and ok
     return ok
 
 
