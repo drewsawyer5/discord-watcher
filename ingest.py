@@ -62,6 +62,11 @@ LLM_BASE_URL  = os.getenv("LLM_BASE_URL", "https://generativelanguage.googleapis
 INGEST_INSTRUCTIONS_PATH = Path(r"C:\Users\drews\Life Org\MD-AI\01 - CLAUDE\Skills\ingest.md")
 SCHEMA_PATH              = Path(r"C:\Users\drews\Life Org\Obsidian\6 - Wiki Hub\_schema.md")
 
+# PDF drop folder — drop PDFs here to ingest without Discord's 10MB limit
+# Accessible from phone via Obsidian sync. Processed files move to drop/done/.
+PDF_DROP_DIR  = VAULT_PATH / "5 - Storage" / "05 - Raw Ingests" / "pdfs" / "drop"
+PDF_DROP_DONE = PDF_DROP_DIR / "done"
+
 URL_RE = re.compile(r'https?://[^\s>]+')
 AUDIO_EXTENSIONS = {'.ogg', '.mp3', '.mp4', '.wav', '.m4a', '.webm'}
 IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp'}
@@ -180,8 +185,10 @@ def load_state() -> dict:
         state = json.loads(STATE_FILE.read_text(encoding="utf-8"))
         if "failed_ids" not in state:
             state["failed_ids"] = {}  # migrate old state
+        if "processed_drop_files" not in state:
+            state["processed_drop_files"] = []  # migrate old state
         return state
-    return {"last_message_id": None, "processed_ids": [], "failed_ids": {}}
+    return {"last_message_id": None, "processed_ids": [], "failed_ids": {}, "processed_drop_files": []}
 
 
 def save_state(state: dict):
@@ -669,6 +676,117 @@ def run_ingest_pdf(att: dict, message_id: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# PDF drop folder — local path for PDFs too large for Discord (10MB limit)
+# ---------------------------------------------------------------------------
+def run_ingest_pdf_local(file_path: Path) -> bool:
+    """Ingest a PDF from a local file path (drop folder). Same logic as run_ingest_pdf."""
+    import pdfplumber
+
+    filename = file_path.name
+    log.info(f"Ingesting PDF from drop folder: {filename}")
+
+    try:
+        pdf_bytes = file_path.read_bytes()
+    except Exception as e:
+        log.error(f"Failed to read drop PDF {filename}: {e}")
+        return False
+
+    # Save raw binary to raw ingests
+    raw_bin_path = write_raw_binary("pdfs", filename, pdf_bytes)
+    raw_bin_rel = vault_rel(raw_bin_path)
+
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+            tmp.write(pdf_bytes)
+            tmp_path = Path(tmp.name)
+        try:
+            with pdfplumber.open(tmp_path) as pdf:
+                text = "\n".join(page.extract_text() or "" for page in pdf.pages).strip()
+        finally:
+            tmp_path.unlink(missing_ok=True)
+    except Exception as e:
+        log.error(f"PDF extraction failed for {filename}: {e}")
+        post_discord_message(f"⚠️ PDF drop: text extraction failed for `{filename}`: {e}")
+        return False
+
+    if not text:
+        post_discord_message(
+            f"⚠️ PDF drop: `{filename}` appears to be image-only — text extraction returned nothing. "
+            "Open via Claude session for vision-based ingest."
+        )
+        return True  # Not retryable — move to done
+
+    raw_text_path = write_raw_md("pdfs", file_path.stem, text,
+                                 extra_fm={"filename": filename, "pdf": raw_bin_rel, "source": "drop_folder"})
+    raw_text_rel = vault_rel(raw_text_path)
+
+    try:
+        raw = call_llm(
+            get_system_prompt(),
+            f"Content type: PDF (dropped into local ingest folder by Drew)\nFilename: {filename}\nRaw file: [[{raw_text_rel}]]{get_existing_lists_context()}\n\nExtracted text (capped at 50k):\n{text[:50000]}",
+        )
+        result = json.loads(raw)
+    except Exception as e:
+        log.error(f"LLM error for drop PDF {filename}: {e}")
+        write_retry_queue_entry("lm_failed", f"drop_pdf:{filename}", raw_text_rel)
+        post_discord_message(f"⚠️ PDF drop: LLM error for `{filename}` — logged to retry queue")
+        return False
+
+    # Use post_discord_message (no reply thread) since there's no originating Discord message
+    ingest_type = result.get("type", "unknown")
+    if ingest_type not in ("youtube", "unsupported"):
+        for op in result.get("files", []):
+            rel_path = op.get("path", "")
+            file_content = op.get("content", "")
+            mode = op.get("mode", "create")
+            if not rel_path or not file_content:
+                continue
+            if rel_path.startswith(_RAW_INGEST_PREFIX):
+                continue
+            path = VAULT_PATH / rel_path
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if mode == "append":
+                with path.open("a", encoding="utf-8") as f:
+                    f.write(file_content.rstrip() + "\n")
+            else:
+                path.write_text(file_content, encoding="utf-8")
+            log.info(f"  [{mode}] {rel_path}")
+
+    post_discord_message(result.get("discord_reply", f"📄 PDF drop ingested: {filename}"))
+    log.info(f"Drop PDF done: {filename}")
+    return True
+
+
+def check_pdf_drop_folder(state: dict):
+    """Scan the PDF drop folder and process any new PDFs found."""
+    PDF_DROP_DIR.mkdir(parents=True, exist_ok=True)
+    PDF_DROP_DONE.mkdir(parents=True, exist_ok=True)
+
+    processed = set(state.get("processed_drop_files", []))
+    new_files = [f for f in PDF_DROP_DIR.glob("*.pdf") if f.name not in processed]
+
+    if not new_files:
+        return
+
+    log.info(f"Found {len(new_files)} new PDF(s) in drop folder")
+    for pdf_path in new_files:
+        success = run_ingest_pdf_local(pdf_path)
+        if success:
+            # Move to done/ so drop folder stays clean
+            done_path = PDF_DROP_DONE / pdf_path.name
+            try:
+                pdf_path.rename(done_path)
+            except Exception as e:
+                log.warning(f"Could not move {pdf_path.name} to done/: {e}")
+            processed.add(pdf_path.name)
+            log.info(f"Drop PDF moved to done/: {pdf_path.name}")
+        else:
+            log.warning(f"Drop PDF failed (will retry next cycle): {pdf_path.name}")
+
+    state["processed_drop_files"] = list(processed)[-500:]  # cap list size
+
+
+# ---------------------------------------------------------------------------
 # Message filter
 # ---------------------------------------------------------------------------
 def has_audio_attachment(msg: dict) -> bool:
@@ -769,6 +887,7 @@ def main():
     while True:
         try:
             check_digest_notify()
+            check_pdf_drop_folder(state)
 
             # Retry previously failed messages before processing new ones
             for msg_id, attempts in list(state["failed_ids"].items()):
