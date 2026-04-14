@@ -375,12 +375,12 @@ Rules:
 - Always include _log.md append. The file already has a header row — append exactly one bare data row with NO extra formatting, NO table headers, NO blank lines before or after it:
   | YYYY-MM-DD | {{type}} | {{title}} | {{source_url or "attachment" or "text"}} | {{wiki_page_path}} |
   Example: | 2026-04-09 | article | My Title | https://example.com | 6 - Wiki Hub/Sources/My-Title.md |
-  Types: article, paper, list_item, note, image, voice
+  Types: article, paper, list_item, note, image, voice, video
 - Do NOT touch _index.md — /digest owns and rebuilds that file
 - For list items: append one line to the correct Lists/ page; set mode "append"
 - For list pages that may not exist: set mode "create" with full page content including the Queue header, then the one item
 - For image: describe what's in the image, write a note to 6 - Wiki Hub/ in the appropriate section, include _log.md append as usual
-- For youtube: set files=[] and discord_reply="Queued for YouTube ingestion (not yet built)."
+- For video (YouTube): treat exactly like article/source — write a wiki page in 6 - Wiki Hub/Videos/, include _log.md append with type "video". The transcript and metadata are already extracted by the system before this call.
 - For unsupported (non-image attachment, unknown file type): set files=[] and discord_reply="Unsupported file type — drop via Claude session."
 - discord_reply must be 4 lines or fewer
 - If the user message contains "Raw file: [[path]]", add "- **Raw:** [[path]]" to the ## Metadata section of all wiki pages being created (not to _log.md)
@@ -410,16 +410,6 @@ _RAW_INGEST_PREFIX = "5 - Storage/05 - Raw Ingests/"
 def _apply_ingest_result(result: dict, message_id: str, label: str):
     """Write files and post reply from a parsed LLM result. Shared by URL and voice paths."""
     ingest_type = result.get("type", "unknown")
-
-    if ingest_type == "youtube":
-        queue_path = VAULT_PATH / "5 - Storage/05 - Raw Ingests/YouTube Queue.md"
-        queue_path.parent.mkdir(parents=True, exist_ok=True)
-        today = datetime.now().strftime("%Y-%m-%d")
-        with queue_path.open("a", encoding="utf-8") as f:
-            f.write(f"- [ ] {today} — {label}\n")
-        log.info("Queued YouTube URL")
-        post_discord_reply(result.get("discord_reply", "Queued for YouTube ingestion."), message_id)
-        return
 
     if ingest_type == "unsupported":
         post_discord_reply(result.get("discord_reply", "Unsupported content type."), message_id)
@@ -457,7 +447,139 @@ def _apply_ingest_result(result: dict, message_id: str, label: str):
 LLM_URL_CAP = 25_000  # chars passed to LLM for URL content
 
 
+def _is_youtube_url(url: str) -> bool:
+    return "youtube.com" in url or "youtu.be" in url
+
+
+def _parse_vtt(vtt_text: str) -> str:
+    """Strip VTT timestamps and deduplicate consecutive identical lines."""
+    timestamp_re = re.compile(r"^\d{2}:\d{2}[:\d.]+\s*-->\s*\d{2}:\d{2}[:\d.]+")
+    lines = []
+    prev = None
+    for line in vtt_text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("WEBVTT") or timestamp_re.match(line) or line.startswith("NOTE"):
+            continue
+        # Strip inline VTT tags like <00:00:01.234><c>...</c>
+        line = re.sub(r"<[^>]+>", "", line).strip()
+        if not line or line == prev:
+            continue
+        lines.append(line)
+        prev = line
+    return " ".join(lines)
+
+
+def run_ingest_youtube(url: str, message_id: str, drew_context: str = "") -> bool:
+    import subprocess
+
+    log.info(f"YouTube ingest: {url}")
+
+    # Step 1 — metadata
+    try:
+        meta_proc = subprocess.run(
+            ["yt-dlp", "--dump-json", "--skip-download", url],
+            capture_output=True, text=True, encoding="utf-8", timeout=60,
+        )
+        if meta_proc.returncode != 0:
+            raise RuntimeError(meta_proc.stderr.strip())
+        meta = json.loads(meta_proc.stdout)
+    except Exception as e:
+        log.error(f"yt-dlp metadata failed: {e}")
+        post_discord_reply(f"⚠️ YouTube ingest failed (metadata): {e}", message_id)
+        return False
+
+    title      = meta.get("title", "Unknown Title")
+    channel    = meta.get("channel") or meta.get("uploader", "Unknown")
+    upload_dt  = meta.get("upload_date", "")  # YYYYMMDD
+    upload_iso = f"{upload_dt[:4]}-{upload_dt[4:6]}-{upload_dt[6:]}" if len(upload_dt) == 8 else upload_dt
+    duration_s = meta.get("duration", 0)
+    duration   = f"{duration_s // 3600:02d}:{(duration_s % 3600) // 60:02d}:{duration_s % 60:02d}" if duration_s else "unknown"
+    video_id   = meta.get("id", "unknown")
+
+    # Step 2 — captions
+    today = datetime.now().strftime("%Y-%m-%d")
+    slug  = re.sub(r"[^\w-]", "-", title.lower())[:60].strip("-")
+    tmp_prefix = Path(tempfile.gettempdir()) / f"yt_{video_id}"
+    transcript = ""
+
+    try:
+        cap_proc = subprocess.run(
+            [
+                "yt-dlp",
+                "--write-auto-subs", "--write-subs",
+                "--sub-lang", "en",
+                "--sub-format", "vtt",
+                "--skip-download",
+                "-o", str(tmp_prefix),
+                url,
+            ],
+            capture_output=True, text=True, encoding="utf-8", timeout=120,
+        )
+        # Find the downloaded .vtt file
+        vtt_files = list(Path(tempfile.gettempdir()).glob(f"yt_{video_id}*.vtt"))
+        if vtt_files:
+            vtt_text = vtt_files[0].read_text(encoding="utf-8", errors="replace")
+            transcript = _parse_vtt(vtt_text)
+            for vf in vtt_files:
+                vf.unlink(missing_ok=True)
+        else:
+            log.warning(f"No captions found for {url}")
+    except Exception as e:
+        log.warning(f"Caption download failed: {e}")
+
+    # Step 3 — write raw
+    raw_body = f"# Metadata\n- Title: {title}\n- Channel: {channel}\n- Upload date: {upload_iso}\n- Duration: {duration_s}s ({duration})\n- URL: {url}\n\n# Transcript\n\n{transcript or '[No captions available]'}"
+    raw_path = write_raw_md("videos", slug, raw_body, extra_fm={"url": url, "video_id": video_id})
+    raw_rel  = vault_rel(raw_path)
+
+    if not transcript:
+        # Note failure in raw and reply; Step 9 whisper fallback can pick this up
+        queue_path = VAULT_PATH / "5 - Storage/05 - Raw Ingests/YouTube Queue.md"
+        queue_path.parent.mkdir(parents=True, exist_ok=True)
+        with queue_path.open("a", encoding="utf-8") as f:
+            f.write(f"- [ ] {today} — {url} [NO-CAPTIONS]\n")
+        post_discord_reply(f"⚠️ YouTube — no captions available for <{url}>. Queued for whisper fallback.", message_id)
+        return True
+
+    # Step 4 — call LLM to build wiki page
+    context_note = f"\nDrew's note: {drew_context}" if drew_context else ""
+    llm_transcript = transcript[:40_000]
+    truncated = len(transcript) > 40_000
+    trunc_note = f"\n\n[Transcript truncated at 40k chars — full text in raw file]" if truncated else ""
+
+    prompt = (
+        f"Content type: YouTube video\n"
+        f"Title: {title}\n"
+        f"Channel: {channel}\n"
+        f"Published: {upload_iso}\n"
+        f"Duration: {duration}\n"
+        f"URL: {url}\n"
+        f"Raw file: [[{raw_rel}]]\n"
+        f"{context_note}"
+        f"{get_existing_lists_context()}\n\n"
+        f"Transcript:{trunc_note}\n{llm_transcript}\n\n"
+        f"Write a wiki page in 6 - Wiki Hub/Videos/ using the YouTube wiki format from the ingest skill. "
+        f"Filename should be the kebab-case video title. "
+        f"Set type='video' in your JSON response."
+    )
+
+    try:
+        raw_llm = call_llm(get_system_prompt(), prompt)
+        result  = json.loads(raw_llm)
+    except Exception as e:
+        log.error(f"LLM error for YouTube {url}: {e}")
+        write_retry_queue_entry("lm_failed", url, raw_rel)
+        post_discord_reply(f"⚠️ YouTube ingest failed: LLM error — will retry next cycle", message_id)
+        return False
+
+    _apply_ingest_result(result, message_id, url)
+    return True
+
+
 def run_ingest(url: str, message_id: str, drew_context: str = "") -> bool:
+    if _is_youtube_url(url):
+        return run_ingest_youtube(url, message_id, drew_context=drew_context)
+
     log.info(f"Ingesting URL: {url}")
     content = fetch_url_content(url)
     # Raw gets full text; LLM gets capped version
