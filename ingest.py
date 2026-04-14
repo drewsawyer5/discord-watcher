@@ -385,6 +385,7 @@ Rules:
 - discord_reply must be 4 lines or fewer
 - If the user message contains "Raw file: [[path]]", add "- **Raw:** [[path]]" to the ## Metadata section of all wiki pages being created (not to _log.md)
 - NEVER include paths under "5 - Storage/05 - Raw Ingests/" in the files[] array — those files are already written by the system before your call and must not be overwritten
+- NEVER write to vault folders 1–4 (1 - Homepage/, 2 - Projects/, 3 - Work/, 4 - Personal/). All output goes to 6 - Wiki Hub/ only. Routing to 1–4 is handled by /digest in a separate Claude session — not here.
 """
     return _system_prompt
 
