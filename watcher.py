@@ -22,6 +22,8 @@ LOG_BASE = Path(os.getenv("INBOX_LOG_DIR", r"C:\Users\drews\Life Org\MD-AI\00 - 
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "base")
 STATUS_FILE = Path(__file__).parent / "status.json"
 HEARTBEAT_INTERVAL = 300  # seconds (5 minutes)
+INBOX_MAX_AGE_HOURS = int(os.getenv("INBOX_MAX_AGE_HOURS", "72"))
+CLEANUP_INTERVAL = 3600  # seconds (1 hour)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -47,6 +49,28 @@ def heartbeat_loop():
     while True:
         write_heartbeat()
         time.sleep(HEARTBEAT_INTERVAL)
+
+
+def cleanup_old_inbox_files():
+    """Delete .ogg and .txt files in the inbox older than INBOX_MAX_AGE_HOURS."""
+    cutoff = time.time() - INBOX_MAX_AGE_HOURS * 3600
+    removed = 0
+    for ext in ("*.ogg", "*.txt"):
+        for f in INBOX_DIR.glob(ext):
+            try:
+                if f.stat().st_mtime < cutoff:
+                    f.unlink()
+                    removed += 1
+            except Exception as e:
+                log.warning(f"Could not delete {f.name}: {e}")
+    if removed:
+        log.info(f"Inbox cleanup: removed {removed} files older than {INBOX_MAX_AGE_HOURS}h")
+
+
+def cleanup_loop():
+    while True:
+        time.sleep(CLEANUP_INTERVAL)
+        cleanup_old_inbox_files()
 
 
 def transcribe(ogg_path: Path) -> str:
@@ -104,12 +128,13 @@ def main():
     log.info(f"Watching {INBOX_DIR} for .ogg files")
     log.info(f"Whisper model: {WHISPER_MODEL}")
 
-    # Write initial heartbeat and start background heartbeat thread
+    # Write initial heartbeat and start background threads
     write_heartbeat()
-    t = threading.Thread(target=heartbeat_loop, daemon=True)
-    t.start()
+    threading.Thread(target=heartbeat_loop, daemon=True).start()
+    threading.Thread(target=cleanup_loop, daemon=True).start()
 
-    # Catch up on any existing untranscribed files
+    # Clean up old files on startup, then catch up on any existing untranscribed files
+    cleanup_old_inbox_files()
     for ogg in sorted(INBOX_DIR.glob("*.ogg")):
         process_ogg(ogg)
 
