@@ -451,6 +451,83 @@ def _is_youtube_url(url: str) -> bool:
     return "youtube.com" in url or "youtu.be" in url
 
 
+def _is_twitter_url(url: str) -> bool:
+    return ("x.com" in url or "twitter.com" in url) and "/status/" in url
+
+
+def _extract_tweet_id(url: str) -> str | None:
+    m = re.search(r'/status/(\d+)', url)
+    return m.group(1) if m else None
+
+
+TWITTER_COOKIES_FILE = Path(__file__).parent / "twitter_cookies.json"
+
+
+async def _fetch_tweet_async(tweet_id: str):
+    from twikit import Client
+    client = Client('en-US')
+    if TWITTER_COOKIES_FILE.exists():
+        try:
+            client.load_cookies(str(TWITTER_COOKIES_FILE))
+            tweet = await client.get_tweet_by_id(tweet_id)
+            return tweet
+        except Exception:
+            log.warning("Twitter cookies expired or invalid — re-authenticating")
+            TWITTER_COOKIES_FILE.unlink(missing_ok=True)
+
+    username = os.getenv("TWITTER_USERNAME", "")
+    email    = os.getenv("TWITTER_EMAIL", "")
+    password = os.getenv("TWITTER_PASSWORD", "")
+    if not all([username, email, password]):
+        raise ValueError("TWITTER_USERNAME, TWITTER_EMAIL, TWITTER_PASSWORD required in .env for Twitter ingest")
+    await client.login(auth_info_1=username, auth_info_2=email, password=password)
+    client.save_cookies(str(TWITTER_COOKIES_FILE))
+    return await client.get_tweet_by_id(tweet_id)
+
+
+def run_ingest_twitter(url: str, message_id: str, drew_context: str = "") -> bool:
+    import asyncio
+
+    tweet_id = _extract_tweet_id(url)
+    if not tweet_id:
+        post_discord_reply(f"⚠️ Couldn't extract tweet ID from {url}", message_id)
+        return False
+
+    log.info(f"Twitter ingest: {url}")
+    try:
+        tweet = asyncio.run(_fetch_tweet_async(tweet_id))
+    except Exception as e:
+        log.error(f"twikit fetch failed for {url}: {e}")
+        write_retry_queue_entry("fetch_failed", url, "")
+        post_discord_reply(f"⚠️ Twitter fetch failed: {e}", message_id)
+        return False
+
+    username   = tweet.user.screen_name if tweet.user else "unknown"
+    name       = tweet.user.name if tweet.user else "unknown"
+    text       = tweet.text or ""
+    created_at = str(tweet.created_at) if hasattr(tweet, "created_at") else ""
+
+    content = f"@{username} ({name})\n{created_at}\n\n{text}"
+    raw_path = write_raw_md("urls", url, content, extra_fm={"url": url, "tweet_id": tweet_id})
+    raw_rel  = vault_rel(raw_path)
+
+    context_note = f"\nDrew's note: {drew_context}" if drew_context else ""
+    try:
+        raw = call_llm(
+            get_system_prompt(),
+            f"URL: {url}\nContent type: Twitter/X post\nRaw file: [[{raw_rel}]]{context_note}{get_existing_lists_context()}\n\nTweet content:\n{content}",
+        )
+        result = json.loads(raw)
+    except Exception as e:
+        log.error(f"LLM error for tweet {url}: {e}")
+        write_retry_queue_entry("lm_failed", url, raw_rel)
+        post_discord_reply("⚠️ Tweet ingest failed: LLM error — will retry next cycle", message_id)
+        return False
+
+    _apply_ingest_result(result, message_id, url)
+    return True
+
+
 def _parse_vtt(vtt_text: str) -> str:
     """Strip VTT timestamps and deduplicate consecutive identical lines."""
     timestamp_re = re.compile(r"^\d{2}:\d{2}[:\d.]+\s*-->\s*\d{2}:\d{2}[:\d.]+")
@@ -579,6 +656,8 @@ def run_ingest_youtube(url: str, message_id: str, drew_context: str = "") -> boo
 def run_ingest(url: str, message_id: str, drew_context: str = "") -> bool:
     if _is_youtube_url(url):
         return run_ingest_youtube(url, message_id, drew_context=drew_context)
+    if _is_twitter_url(url):
+        return run_ingest_twitter(url, message_id, drew_context=drew_context)
 
     log.info(f"Ingesting URL: {url}")
     content = fetch_url_content(url)
