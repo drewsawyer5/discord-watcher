@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-ingest.py — Background ingest processor for Drew's PA system.
+process_ingest.py — Background ingest processor for Drew's PA system.
 
 Polls #inbox on Discord for:
   - URLs       → fetches content → Gemini Flash → wiki page

@@ -1,4 +1,4 @@
 @echo off
 cd /d "%~dp0"
-python ingest.py
+python process_ingest.py
 pause

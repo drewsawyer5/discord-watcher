@@ -1,8 +1,8 @@
 """
-restart_claude.py — kills Claude, triggers watchdog relaunch, posts start-session to Discord.
+restart.py — kills Claude, triggers supervisor relaunch, posts start-session to Discord.
 Called by the /restart-session skill as a detached background process.
 
-Usage: python restart_claude.py
+Usage: python restart.py
 """
 import os
 import subprocess
@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 _env_path = Path(__file__).parent.parent / ".env"
 load_dotenv(_env_path)
 
-WATCHDOG_PATH    = Path(__file__).parent / "watchdog.ps1"
+WATCHDOG_PATH    = Path(__file__).parent / "supervisor.ps1"
 LOG_PATH         = Path(__file__).parent / "restart.log"
 
 WAIT_BEFORE_KILL = 12  # seconds for Claude to finish its Discord post before kill
@@ -28,7 +28,7 @@ def log(msg: str):
 
 
 def main():
-    log("restart_claude.py started")
+    log("restart.py started")
 
     log(f"waiting {WAIT_BEFORE_KILL}s for Claude to finish Discord post")
     time.sleep(WAIT_BEFORE_KILL)
@@ -39,7 +39,7 @@ def main():
     log(f"waiting {WAIT_AFTER_KILL}s before watchdog call")
     time.sleep(WAIT_AFTER_KILL)
 
-    log(f"calling watchdog: {WATCHDOG_PATH}")
+    log(f"calling supervisor: {WATCHDOG_PATH}")
     proc = subprocess.run(
         ["powershell", "-NonInteractive", "-File", str(WATCHDOG_PATH)],
         capture_output=True,
@@ -51,7 +51,7 @@ def main():
     if proc.stderr.strip():
         log(f"watchdog stderr: {proc.stderr.strip()}")
 
-    log("done — watchdog will launch Claude with /start-session as initial prompt")
+    log("done — supervisor will launch Claude with /start-session as initial prompt")
 
 
 if __name__ == "__main__":
