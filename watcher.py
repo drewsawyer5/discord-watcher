@@ -10,6 +10,9 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 from faster_whisper import WhisperModel
 
+_processing_lock = threading.Lock()
+_in_progress: set[str] = set()
+
 # Force UTF-8 output on Windows so emoji in log entries don't crash the terminal
 if sys.stdout.encoding != "utf-8":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -96,10 +99,16 @@ def append_to_log(transcript: str, source_file: str):
 
 def process_ogg(ogg_path: Path):
     global files_transcribed
-    txt_path = ogg_path.with_suffix(".txt")
-    if txt_path.exists():
-        log.info(f"Already transcribed: {ogg_path.name}")
-        return
+    key = str(ogg_path)
+    with _processing_lock:
+        if key in _in_progress:
+            log.info(f"Already in progress: {ogg_path.name}")
+            return
+        txt_path = ogg_path.with_suffix(".txt")
+        if txt_path.exists():
+            log.info(f"Already transcribed: {ogg_path.name}")
+            return
+        _in_progress.add(key)
     log.info(f"Transcribing: {ogg_path.name}")
     try:
         transcript = transcribe(ogg_path)
@@ -110,6 +119,8 @@ def process_ogg(ogg_path: Path):
         write_heartbeat()  # update immediately after each transcription
     except Exception as e:
         log.error(f"Failed to transcribe {ogg_path.name}: {e}")
+    finally:
+        _in_progress.discard(key)
 
 
 class OggHandler(FileSystemEventHandler):
