@@ -20,7 +20,7 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).parent.parent / ".env")
 
 BOT_TOKEN       = os.getenv("DISCORD_BOT_TOKEN", "")
-DEFAULT_CHANNEL = os.getenv("GENERAL_CHANNEL_ID", "1474888067893559360")
+DEFAULT_CHANNEL = os.getenv("GENERAL_CHANNEL_ID", "")
 API_BASE        = "https://discord.com/api/v10"
 
 
