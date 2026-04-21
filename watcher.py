@@ -18,7 +18,7 @@ if sys.stderr.encoding != "utf-8":
 
 # Paths — override with .env vars if needed
 INBOX_DIR = Path(os.getenv("DISCORD_INBOX", r"C:\Users\drews\.claude\channels\discord\inbox"))
-LOG_BASE = Path(os.getenv("INBOX_LOG_DIR", r"C:\Users\drews\Life Org\MD-AI\00 - Inbox\logs"))
+LOG_BASE = Path(os.getenv("INBOX_LOG_DIR", r"C:\Users\drews\Life Org\Obsidian\7 - MD-AI\00 - Inbox\logs"))
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "base")
 STATUS_FILE = Path(__file__).parent / "status.json"
 HEARTBEAT_INTERVAL = 300  # seconds (5 minutes)

@@ -59,7 +59,7 @@ LLM_API_KEY   = os.getenv("LLM_API_KEY") or os.getenv("GEMINI_API_KEY", "")  # f
 LLM_MODEL     = os.getenv("LLM_MODEL") or os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
 LLM_BASE_URL  = os.getenv("LLM_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai/")
 
-INGEST_INSTRUCTIONS_PATH = Path(r"C:\Users\drews\Life Org\MD-AI\01 - CLAUDE\Skills\ingest.md")
+INGEST_INSTRUCTIONS_PATH = Path(r"C:\Users\drews\Life Org\Obsidian\7 - MD-AI\03 - Skills\ingest.md")
 SCHEMA_PATH              = Path(r"C:\Users\drews\Life Org\Obsidian\6 - Wiki Hub\_schema.md")
 
 # PDF drop folder — drop PDFs here to ingest without Discord's 10MB limit
@@ -257,7 +257,7 @@ def post_discord_message(content: str, channel_id: str | None = None):
 
 
 # Digest notification — /digest writes this file; we pick it up and send via bot
-DIGEST_NOTIFY_FILE = VAULT_PATH.parent / "MD-AI" / "digest-notify-pending.md"
+DIGEST_NOTIFY_FILE = VAULT_PATH / "7 - MD-AI" / "00 - Inbox" / "digest-notify-pending.md"
 
 # Retry queue — items that failed to fully process (fetch blocked or LLM down)
 RETRY_QUEUE_FILE = VAULT_PATH / "6 - Wiki Hub" / "_retry_queue.md"
