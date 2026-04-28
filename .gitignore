@@ -12,5 +12,4 @@ venv/
 *.log
 *_state.json
 status.json
-=*
 twitter_cookies.json
