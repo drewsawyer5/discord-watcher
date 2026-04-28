@@ -33,6 +33,14 @@ log = logging.getLogger(__name__)
 
 model = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
 
+# Seed the decoder with expected names and topic vocabulary so Whisper biases
+# toward recognizing them correctly. Keep under ~50 words; only affects first segment.
+_INITIAL_PROMPT = (
+    "Casual conversation between Drew and Sydney. "
+    "Topics: Obsidian, Discord, Claude, Resy, Tasker, AutoInput, Boston, Somerville, "
+    "Eevee, TCG Pocket, browser-harness, reservations, wine bar."
+)
+
 files_transcribed = 0
 
 
@@ -77,7 +85,17 @@ def cleanup_loop():
 
 
 def transcribe(ogg_path: Path) -> str:
-    segments, _ = model.transcribe(str(ogg_path), language="en", condition_on_previous_text=False)
+    segments, _ = model.transcribe(
+        str(ogg_path),
+        language="en",
+        condition_on_previous_text=False,
+        initial_prompt=_INITIAL_PROMPT,
+        vad_filter=True,
+        no_speech_threshold=0.4,
+        compression_ratio_threshold=2.1,
+        log_prob_threshold=-0.8,
+        beam_size=5,
+    )
     return " ".join(s.text.strip() for s in segments).strip()
 
 
