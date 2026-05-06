@@ -6,6 +6,7 @@ Usage: python restart.py
 """
 import os
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -18,26 +19,52 @@ load_dotenv(_env_path)
 WATCHDOG_PATH    = Path(__file__).parent / "supervisor.ps1"
 LOG_PATH         = Path(__file__).parent / "restart.log"
 
-WAIT_BEFORE_KILL = 12  # seconds for Claude to finish its Discord post before kill
-WAIT_AFTER_KILL  = 3   # seconds before calling watchdog
+WAIT_BEFORE_KILL  = 12   # seconds for Claude to finish its Discord post before kill
+KILL_VERIFY_TIMEOUT = 15  # seconds to wait for claude.exe to disappear after taskkill
+PROCESS_NAME      = "claude.exe"
 
 
 def log(msg: str):
     with open(LOG_PATH, "a", encoding="utf-8") as f:
-        f.write(f"{time.strftime('%H:%M:%S')} {msg}\n")
+        f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}\n")
+
+
+def is_process_running(name: str) -> bool:
+    result = subprocess.run(
+        ["tasklist", "/FI", f"IMAGENAME eq {name}", "/NH"],
+        capture_output=True, text=True,
+    )
+    return name.lower() in result.stdout.lower()
+
+
+def wait_for_death(name: str, timeout: int) -> bool:
+    """Poll until process is gone. Returns True if confirmed dead within timeout."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if not is_process_running(name):
+            return True
+        time.sleep(1)
+    return False
 
 
 def main():
     log("restart.py started")
 
-    log(f"waiting {WAIT_BEFORE_KILL}s for Claude to finish Discord post")
+    if not is_process_running(PROCESS_NAME):
+        log(f"WARNING: {PROCESS_NAME} not found before kill — nothing to restart")
+        sys.exit(1)
+
+    log(f"confirmed {PROCESS_NAME} is running — waiting {WAIT_BEFORE_KILL}s for Discord post")
     time.sleep(WAIT_BEFORE_KILL)
 
-    result = os.system("taskkill /F /IM claude.exe")
+    result = os.system(f"taskkill /F /IM {PROCESS_NAME}")
     log(f"taskkill exit code: {result}")
 
-    log(f"waiting {WAIT_AFTER_KILL}s before watchdog call")
-    time.sleep(WAIT_AFTER_KILL)
+    log(f"verifying {PROCESS_NAME} is dead (up to {KILL_VERIFY_TIMEOUT}s)...")
+    if not wait_for_death(PROCESS_NAME, KILL_VERIFY_TIMEOUT):
+        log(f"ERROR: {PROCESS_NAME} still running after {KILL_VERIFY_TIMEOUT}s — aborting restart")
+        sys.exit(1)
+    log(f"{PROCESS_NAME} confirmed dead — proceeding to supervisor")
 
     log(f"calling supervisor: {WATCHDOG_PATH}")
     proc = subprocess.run(
@@ -45,13 +72,13 @@ def main():
         capture_output=True,
         text=True,
     )
-    log(f"watchdog exit code: {proc.returncode}")
+    log(f"supervisor exit code: {proc.returncode}")
     if proc.stdout.strip():
-        log(f"watchdog stdout: {proc.stdout.strip()}")
+        log(f"supervisor stdout: {proc.stdout.strip()}")
     if proc.stderr.strip():
-        log(f"watchdog stderr: {proc.stderr.strip()}")
+        log(f"supervisor stderr: {proc.stderr.strip()}")
 
-    log("done — supervisor will launch Claude with /start-session as initial prompt")
+    log("done — supervisor will launch Claude")
 
 
 if __name__ == "__main__":

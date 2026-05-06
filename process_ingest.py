@@ -27,6 +27,13 @@ from datetime import datetime
 from dotenv import load_dotenv
 from openai import OpenAI
 from faster_whisper import WhisperModel
+from discord_client import (
+    discord_get,
+    discord_get_message,
+    discord_post,
+    post_discord_message,
+    post_discord_reply,
+)
 
 # Load shared Drew_code/.env (one level up from this repo)
 _env_path = Path(__file__).parent.parent / ".env"
@@ -49,6 +56,7 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 DISCORD_BOT_TOKEN  = os.getenv("DISCORD_BOT_TOKEN", "")
 INGEST_CHANNEL_ID  = os.getenv("INGEST_CHANNEL_ID", "1474888067893559360")
+GENERAL_CHANNEL_ID = os.getenv("GENERAL_CHANNEL_ID", "1474888067893559360")
 DREW_USER_ID       = os.getenv("DREW_USER_ID", "")      # optional: only process messages from this Discord user ID
 VAULT_PATH         = Path(os.getenv("VAULT_PATH", r"C:\Users\drews\Life Org\Obsidian"))
 POLL_INTERVAL      = int(os.getenv("INGEST_POLL_INTERVAL", "30"))
@@ -203,36 +211,6 @@ def _discord_headers() -> dict:
     return {"Authorization": f"Bot {DISCORD_BOT_TOKEN}"}
 
 
-def discord_get(endpoint: str) -> list | dict:
-    resp = requests.get(
-        f"https://discord.com/api/v10{endpoint}",
-        headers=_discord_headers(),
-        timeout=10,
-    )
-    resp.raise_for_status()
-    return resp.json()
-
-
-def discord_post(endpoint: str, payload: dict) -> dict:
-    resp = requests.post(
-        f"https://discord.com/api/v10{endpoint}",
-        headers={**_discord_headers(), "Content-Type": "application/json"},
-        json=payload,
-        timeout=10,
-    )
-    resp.raise_for_status()
-    return resp.json()
-
-
-def discord_get_message(message_id: str) -> dict | None:
-    """Fetch a single message by ID for retry processing."""
-    try:
-        return discord_get(f"/channels/{INGEST_CHANNEL_ID}/messages/{message_id}")
-    except Exception as e:
-        log.warning(f"Could not fetch message {message_id}: {e}")
-        return None
-
-
 def fetch_new_messages(after_id: str | None) -> list[dict]:
     params = "?limit=20"
     if after_id:
@@ -240,21 +218,6 @@ def fetch_new_messages(after_id: str | None) -> list[dict]:
     messages = discord_get(f"/channels/{INGEST_CHANNEL_ID}/messages{params}")
     # Discord returns newest-first; reverse for chronological processing
     return list(reversed(messages))
-
-
-def post_discord_reply(content: str, reference_message_id: str):
-    discord_post(
-        f"/channels/{INGEST_CHANNEL_ID}/messages",
-        {
-            "content": content,
-            "message_reference": {"message_id": reference_message_id},
-        },
-    )
-
-
-def post_discord_message(content: str, channel_id: str | None = None):
-    """Post a standalone message to a Discord channel (no reply reference)."""
-    discord_post(f"/channels/{channel_id or INGEST_CHANNEL_ID}/messages", {"content": content})
 
 
 # Digest notification — /digest writes this file; we pick it up and send via bot
@@ -298,8 +261,8 @@ def check_digest_notify():
     try:
         text = DIGEST_NOTIFY_FILE.read_text(encoding="utf-8").strip()
         if text:
-            post_discord_message(text)
-            log.info("Sent pending digest notification to Discord")
+            post_discord_message(text, channel_id=GENERAL_CHANNEL_ID)
+            log.info("Sent pending digest notification to general channel")
         DIGEST_NOTIFY_FILE.unlink()
     except Exception as e:
         log.error(f"Failed to send digest notification: {e}")
@@ -743,9 +706,21 @@ def run_ingest_image(att: dict, message_id: str, drew_context: str = "") -> bool
 # ---------------------------------------------------------------------------
 # PDF ingest
 # ---------------------------------------------------------------------------
-def run_ingest_pdf(att: dict, message_id: str, drew_context: str = "") -> bool:
+def _extract_pdf_text(pdf_bytes: bytes, max_pages: int = 10) -> str:
     import pdfplumber
 
+    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+        tmp.write(pdf_bytes)
+        tmp_path = Path(tmp.name)
+    try:
+        with pdfplumber.open(tmp_path) as pdf:
+            pages = pdf.pages[:max_pages]
+            return "\n".join(page.extract_text() or "" for page in pages).strip()
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
+def run_ingest_pdf(att: dict, message_id: str, drew_context: str = "") -> bool:
     filename = att.get("filename", "document.pdf")
     log.info(f"Downloading PDF: {filename}")
 
@@ -762,14 +737,7 @@ def run_ingest_pdf(att: dict, message_id: str, drew_context: str = "") -> bool:
     raw_bin_rel = vault_rel(raw_bin_path)
 
     try:
-        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
-            tmp.write(resp.content)
-            tmp_path = Path(tmp.name)
-        try:
-            with pdfplumber.open(tmp_path) as pdf:
-                text = "\n".join(page.extract_text() or "" for page in pdf.pages).strip()
-        finally:
-            tmp_path.unlink(missing_ok=True)
+        text = _extract_pdf_text(resp.content)
     except Exception as e:
         log.error(f"PDF extraction failed: {e}")
         post_discord_reply(f"⚠️ PDF text extraction failed: {e}", message_id)
@@ -810,8 +778,6 @@ def run_ingest_pdf(att: dict, message_id: str, drew_context: str = "") -> bool:
 # ---------------------------------------------------------------------------
 def run_ingest_pdf_local(file_path: Path) -> bool:
     """Ingest a PDF from a local file path (drop folder). Same logic as run_ingest_pdf."""
-    import pdfplumber
-
     filename = file_path.name
     log.info(f"Ingesting PDF from drop folder: {filename}")
 
@@ -826,14 +792,7 @@ def run_ingest_pdf_local(file_path: Path) -> bool:
     raw_bin_rel = vault_rel(raw_bin_path)
 
     try:
-        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
-            tmp.write(pdf_bytes)
-            tmp_path = Path(tmp.name)
-        try:
-            with pdfplumber.open(tmp_path) as pdf:
-                text = "\n".join(page.extract_text() or "" for page in pdf.pages).strip()
-        finally:
-            tmp_path.unlink(missing_ok=True)
+        text = _extract_pdf_text(pdf_bytes)
     except Exception as e:
         log.error(f"PDF extraction failed for {filename}: {e}")
         post_discord_message(f"⚠️ PDF drop: text extraction failed for `{filename}`: {e}")
