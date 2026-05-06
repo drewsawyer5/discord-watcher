@@ -67,8 +67,8 @@ LLM_API_KEY   = os.getenv("LLM_API_KEY") or os.getenv("GEMINI_API_KEY", "")  # f
 LLM_MODEL     = os.getenv("LLM_MODEL") or os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
 LLM_BASE_URL  = os.getenv("LLM_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai/")
 
-INGEST_INSTRUCTIONS_PATH = Path(r"C:\Users\drews\Life Org\Obsidian\7 - MD-AI\03 - Skills\ingest.md")
-SCHEMA_PATH              = Path(r"C:\Users\drews\Life Org\Obsidian\6 - Wiki Hub\_schema.md")
+INGEST_INSTRUCTIONS_PATH = Path(os.getenv("INGEST_INSTRUCTIONS_PATH") or "") or VAULT_PATH / "7 - MD-AI" / "03 - Skills" / "ingest.md"
+SCHEMA_PATH              = Path(os.getenv("SCHEMA_PATH") or "") or VAULT_PATH / "6 - Wiki Hub" / "_schema.md"
 
 # PDF drop folder — drop PDFs here to ingest without Discord's 10MB limit
 # Accessible from phone via Obsidian sync. Processed files move to drop/done/.

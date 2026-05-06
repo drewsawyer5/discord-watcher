@@ -1,0 +1,18 @@
+[Unit]
+Description=Discord voice watcher transcription service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=/home/drews/discord-watcher
+EnvironmentFile=/home/drews/Drew_code/.env
+Environment=PYTHONUNBUFFERED=1
+Environment=VAULT_PATH=/home/drews/obsidian
+Environment=INBOX_LOG_DIR=/home/drews/obsidian/7 - MD-AI/00 - Inbox/logs
+ExecStart=/home/drews/discord-watcher/.venv/bin/python voice_watcher.py
+Restart=always
+RestartSec=5
+User=drews
+
+[Install]
+WantedBy=multi-user.target

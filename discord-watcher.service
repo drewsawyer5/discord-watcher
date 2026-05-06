@@ -1,0 +1,17 @@
+[Unit]
+Description=Discord watcher ingest processor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=/home/drews/discord-watcher
+EnvironmentFile=/home/drews/Drew_code/.env
+Environment=PYTHONUNBUFFERED=1
+Environment=VAULT_PATH=/home/drews/obsidian
+ExecStart=/home/drews/discord-watcher/.venv/bin/python process_ingest.py
+Restart=always
+RestartSec=5
+User=drews
+
+[Install]
+WantedBy=multi-user.target
