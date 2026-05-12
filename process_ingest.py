@@ -67,8 +67,8 @@ LLM_API_KEY   = os.getenv("LLM_API_KEY") or os.getenv("GEMINI_API_KEY", "")  # f
 LLM_MODEL     = os.getenv("LLM_MODEL") or os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
 LLM_BASE_URL  = os.getenv("LLM_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai/")
 
-INGEST_INSTRUCTIONS_PATH = Path(os.getenv("INGEST_INSTRUCTIONS_PATH") or "") or VAULT_PATH / "7 - MD-AI" / "03 - Skills" / "ingest.md"
-SCHEMA_PATH              = Path(os.getenv("SCHEMA_PATH") or "") or VAULT_PATH / "6 - Wiki Hub" / "_schema.md"
+INGEST_INSTRUCTIONS_PATH = Path(_v) if (_v := os.getenv("INGEST_INSTRUCTIONS_PATH", "")) else VAULT_PATH / "7 - MD-AI" / "03 - Skills" / "ingest.md"
+SCHEMA_PATH              = Path(_v) if (_v := os.getenv("SCHEMA_PATH", "")) else VAULT_PATH / "6 - Wiki Hub" / "_schema.md"
 
 # PDF drop folder — drop PDFs here to ingest without Discord's 10MB limit
 # Accessible from phone via Obsidian sync. Processed files move to drop/done/.
@@ -310,7 +310,7 @@ def get_system_prompt(force_reload: bool = False) -> str:
 
     _system_prompt = f"""You are an ingest processor for Drew's personal knowledge wiki.
 Today's date: {today}
-Vault root: C:\\Users\\drews\\Life Org\\Obsidian
+Vault root: {VAULT_PATH}
 
 ## Ingest Instructions
 {ingest_md}
