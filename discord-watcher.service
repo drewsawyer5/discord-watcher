@@ -5,7 +5,7 @@ Wants=network-online.target
 
 [Service]
 WorkingDirectory=/home/drews/discord-watcher
-EnvironmentFile=/home/drews/Drew_code/.env
+EnvironmentFile=/home/drews/discord-watcher/.env
 Environment=PYTHONUNBUFFERED=1
 Environment=VAULT_PATH=/home/drews/obsidian
 ExecStart=/home/drews/discord-watcher/.venv/bin/python process_ingest.py
