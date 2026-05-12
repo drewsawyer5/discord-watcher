@@ -308,7 +308,8 @@ def get_system_prompt(force_reload: bool = False) -> str:
     schema_md = SCHEMA_PATH.read_text(encoding="utf-8")
     today = datetime.now().strftime("%Y-%m-%d")
 
-    _system_prompt = f"""You are an ingest processor for Drew's personal knowledge wiki.
+    _system_prompt = f"""/no_think
+You are an ingest processor for Drew's personal knowledge wiki.
 Today's date: {today}
 Vault root: {VAULT_PATH}
 
