@@ -4,6 +4,7 @@ import json
 import time
 import logging
 import threading
+import requests
 from pathlib import Path
 from datetime import datetime
 from watchdog.observers import Observer
@@ -23,6 +24,7 @@ if sys.stderr.encoding != "utf-8":
 INBOX_DIR = Path(os.getenv("DISCORD_INBOX", r"C:\Users\drews\.claude\channels\discord\inbox"))
 LOG_BASE = Path(os.getenv("INBOX_LOG_DIR", r"C:\Users\drews\Life Org\Obsidian\7 - MD-AI\00 - Inbox\logs"))
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "base")
+WHISPER_ENDPOINT = os.getenv("WHISPER_ENDPOINT", "").strip()
 STATUS_FILE = Path(__file__).parent / "status.json"
 HEARTBEAT_INTERVAL = 300  # seconds (5 minutes)
 INBOX_MAX_AGE_HOURS = int(os.getenv("INBOX_MAX_AGE_HOURS", "72"))
@@ -31,7 +33,11 @@ CLEANUP_INTERVAL = 3600  # seconds (1 hour)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
-model = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
+if WHISPER_ENDPOINT:
+    model = None
+    log.info(f"Remote transcription endpoint: {WHISPER_ENDPOINT}")
+else:
+    model = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
 
 # Seed the decoder with expected names and topic vocabulary so Whisper biases
 # toward recognizing them correctly. Keep under ~50 words; only affects first segment.
@@ -50,7 +56,8 @@ def write_heartbeat():
             "last_seen": datetime.now().isoformat(timespec="seconds"),
             "files_transcribed": files_transcribed,
             "watching": str(INBOX_DIR),
-            "model": WHISPER_MODEL,
+            "model": WHISPER_ENDPOINT if WHISPER_ENDPOINT else WHISPER_MODEL,
+            "mode": "remote" if WHISPER_ENDPOINT else "local",
         }, indent=2),
         encoding="utf-8",
     )
@@ -84,7 +91,38 @@ def cleanup_loop():
         cleanup_old_inbox_files()
 
 
-def transcribe(ogg_path: Path) -> str:
+def _transcribe_remote(ogg_path: Path) -> str:
+    with ogg_path.open("rb") as f:
+        resp = requests.post(
+            f"{WHISPER_ENDPOINT}/transcribe",
+            files={"file": (ogg_path.name, f, "audio/ogg")},
+            timeout=120,
+        )
+    resp.raise_for_status()
+    data = resp.json()
+    segments = data.get("segments", [])
+    if segments and segments[0].get("speaker"):
+        # Merge consecutive segments from the same speaker, output labeled turns
+        lines = []
+        current_speaker = None
+        current_texts: list[str] = []
+        for seg in segments:
+            speaker = seg.get("speaker", "UNKNOWN")
+            text = seg.get("text", "").strip()
+            if speaker != current_speaker:
+                if current_texts:
+                    lines.append(f"{current_speaker}: {' '.join(current_texts)}")
+                current_speaker = speaker
+                current_texts = [text] if text else []
+            elif text:
+                current_texts.append(text)
+        if current_texts:
+            lines.append(f"{current_speaker}: {' '.join(current_texts)}")
+        return "\n".join(lines)
+    return data.get("text", "")
+
+
+def _transcribe_local(ogg_path: Path) -> str:
     segments, _ = model.transcribe(
         str(ogg_path),
         language="en",
@@ -97,6 +135,12 @@ def transcribe(ogg_path: Path) -> str:
         beam_size=5,
     )
     return " ".join(s.text.strip() for s in segments).strip()
+
+
+def transcribe(ogg_path: Path) -> str:
+    if WHISPER_ENDPOINT:
+        return _transcribe_remote(ogg_path)
+    return _transcribe_local(ogg_path)
 
 
 def get_log_path() -> Path:
@@ -155,7 +199,10 @@ class OggHandler(FileSystemEventHandler):
 
 def main():
     log.info(f"Watching {INBOX_DIR} for .ogg files")
-    log.info(f"Whisper model: {WHISPER_MODEL}")
+    if WHISPER_ENDPOINT:
+        log.info(f"Transcription mode: remote → {WHISPER_ENDPOINT}")
+    else:
+        log.info(f"Transcription mode: local, model={WHISPER_MODEL}")
 
     # Write initial heartbeat and start background threads
     write_heartbeat()
