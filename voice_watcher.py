@@ -7,9 +7,13 @@ import threading
 import requests
 from pathlib import Path
 from datetime import datetime
+from dotenv import load_dotenv
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 from faster_whisper import WhisperModel
+
+# Load .env from Drew_code/ root (shared env for all projects)
+load_dotenv(Path(__file__).parent.parent / ".env")
 
 _processing_lock = threading.Lock()
 _in_progress: set[str] = set()
