@@ -28,6 +28,22 @@ A PowerShell supervisor (`supervisor.ps1`) keeps the watcher processes running a
 | `debug.bat` | Runs process_ingest.py in foreground for debugging |
 | `fix_tasks.ps1` | One-time admin script — fixes Task Scheduler task definitions (run as Administrator) |
 
+## Codex bridge
+
+Lane 1 Codex bridge files:
+
+- `codex_discord_bridge.py` - Discord gateway for `#codex`
+- `codex_session.py` - persistent Codex PTY session wrapper
+- `launch_codex_bridge.bat` - starts the bridge script
+
+Environment:
+
+```
+CODEX_CHANNEL_ID=1475166363201962077
+CODEX_WORKSPACE=C:\Users\drews\Life Org
+CODEX_TURN_TIMEOUT_SECONDS=180
+```
+
 ## Configuration
 
 Copy `.env.example` to `.env` and set:
@@ -56,6 +72,7 @@ launch.bat             # cold start — all three services at once
 launch_ingest.bat      # start ingest processor only
 launch_watcher.bat     # start voice watcher only
 launch_claude.bat      # start Claude session with Discord channels
+launch_codex_bridge.bat # start Codex Discord bridge for #codex
 debug.bat              # run ingest in foreground (for debugging)
 ```
 
