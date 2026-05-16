@@ -13,3 +13,5 @@ venv/
 *_state.json
 status.json
 twitter_cookies.json
+whisperx_soak.jsonl
+.synthetic_test_tmp/
