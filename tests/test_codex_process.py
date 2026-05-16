@@ -29,7 +29,7 @@ class CodexProcessControllerTests(unittest.TestCase):
         self.assertIn("--search", args)
         self.assertIn("--no-alt-screen", args)
 
-    def test_send_prompt_writes_prompt_and_double_enter_to_submit(self):
+    def test_send_prompt_writes_prompt_then_enter_sequence_to_submit(self):
         process = Mock()
         process.isalive.return_value = True
         process_factory = Mock(return_value=process)
@@ -43,7 +43,15 @@ class CodexProcessControllerTests(unittest.TestCase):
         controller.start()
         controller.send_prompt("hello codex")
 
-        process.write.assert_called_once_with("hello codex\r\r")
+        self.assertEqual(
+            process.write.call_args_list,
+            [
+                unittest.mock.call("\x15"),
+                unittest.mock.call("hello codex"),
+                unittest.mock.call("\r"),
+                unittest.mock.call("\r"),
+            ],
+        )
 
     def test_read_once_returns_process_output(self):
         process = Mock()

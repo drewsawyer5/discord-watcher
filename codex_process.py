@@ -18,6 +18,7 @@ class CodexProcessConfig:
     codex_bin: str
     workspace: Path
     startup_timeout_seconds: int = 10
+    submit_delay_seconds: float = 0.2
 
 
 class CodexProcessController:
@@ -62,7 +63,13 @@ class CodexProcessController:
             RuntimeError: If Codex is not running or stdin is unavailable.
         """
         process = self._require_process()
-        process.write(f"{prompt}\r\r")
+        process.write("\x15")
+        time.sleep(self.config.submit_delay_seconds)
+        process.write(prompt)
+        time.sleep(self.config.submit_delay_seconds)
+        process.write("\r")
+        time.sleep(self.config.submit_delay_seconds)
+        process.write("\r")
 
     def read_once(self, size: int = 4096) -> str:
         """Read one chunk of output from the running Codex process.
