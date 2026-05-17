@@ -8,10 +8,11 @@ import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 from dotenv import load_dotenv
 
-from codex_exec import CodexExecConfig, CodexExecRunner, CodexExecSession
+from codex_exec import CodexBridgeState, CodexExecConfig, CodexExecRunner, CodexExecSession
 from codex_session import CodexSession, CodexSessionConfig
 
 
@@ -38,6 +39,8 @@ class DiscordBridgeConfig:
     turn_timeout_seconds: int
     log_path: Path
     output_dir: Path
+    state_path: Path
+    turn_log_path: Path
     session_mode: str
 
 
@@ -64,6 +67,8 @@ def load_config() -> DiscordBridgeConfig:
         turn_timeout_seconds=int(os.getenv("CODEX_TURN_TIMEOUT_SECONDS", "180")),
         log_path=Path(os.getenv("CODEX_RAW_LOG_PATH", str(REPO_DIR / "codex_discord_bridge_raw.log"))),
         output_dir=Path(os.getenv("CODEX_OUTPUT_DIR", str(REPO_DIR / "codex_exec_outputs"))),
+        state_path=Path(os.getenv("CODEX_STATE_PATH", str(REPO_DIR / "codex_bridge_state.json"))),
+        turn_log_path=Path(os.getenv("CODEX_TURN_LOG_PATH", str(REPO_DIR / "codex_exec_turns.log"))),
         session_mode=os.getenv("CODEX_SESSION_MODE", "exec").strip().lower(),
     )
 
@@ -123,6 +128,8 @@ def build_codex_session(config: DiscordBridgeConfig) -> object:
             CodexExecConfig(
                 workspace=config.workspace,
                 output_dir=config.output_dir,
+                state_path=config.state_path,
+                turn_log_path=config.turn_log_path,
                 timeout_seconds=config.turn_timeout_seconds,
             )
         )
@@ -132,9 +139,15 @@ def build_codex_session(config: DiscordBridgeConfig) -> object:
 class CodexDiscordBridge:
     """Discord gateway wrapper for one persistent Codex session."""
 
-    def __init__(self, config: DiscordBridgeConfig, session: CodexSession) -> None:
+    def __init__(
+        self,
+        config: DiscordBridgeConfig,
+        session: object,
+        state_loader: Callable[[Path], CodexBridgeState] = CodexBridgeState.load,
+    ) -> None:
         self.config = config
         self.session = session
+        self._state_loader = state_loader
         self.queue: "asyncio.Queue[tuple[object, str]]" = asyncio.Queue()
 
     async def enqueue_prompt(self, message: object, prompt: str) -> None:
@@ -161,11 +174,22 @@ class CodexDiscordBridge:
 
     async def restart(self, message: object) -> None:
         await message.reply("Restarting Codex session...")
-        await asyncio.to_thread(self.session.restart)
-        await message.channel.send("Codex session restarted.")
+        session_id = await asyncio.to_thread(self.session.restart)
+        if session_id:
+            await message.channel.send(f"Codex session reset: {session_id}")
+        else:
+            await message.channel.send("Codex session restarted.")
 
     async def status(self, message: object) -> None:
-        await message.reply(f"Codex bridge online. Queue depth: {self.queue.qsize()}.")
+        state = self._state_loader(self.config.state_path)
+        await message.reply(
+            "Codex bridge online. "
+            f"Mode: {self.config.session_mode}. "
+            f"Queue depth: {self.queue.qsize()}. "
+            f"Session: {state.session_id or 'none'}. "
+            f"Last success: {state.last_success_at or 'none'}. "
+            f"Last output: {state.last_output_file or 'none'}."
+        )
 
 
 def main() -> None:

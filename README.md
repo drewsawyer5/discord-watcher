@@ -45,9 +45,16 @@ CODEX_WORKSPACE=C:\Users\drews\Life Org
 CODEX_TURN_TIMEOUT_SECONDS=180
 CODEX_SESSION_MODE=exec
 CODEX_OUTPUT_DIR=C:\Users\drews\Life Org\Drew_code\discord-watcher-codex-bridge\codex_exec_outputs
+CODEX_STATE_PATH=C:\Users\drews\Life Org\Drew_code\discord-watcher-codex-bridge\codex_bridge_state.json
+CODEX_TURN_LOG_PATH=C:\Users\drews\Life Org\Drew_code\discord-watcher-codex-bridge\codex_exec_turns.log
 ```
 
-`CODEX_SESSION_MODE=exec` is the stable path: Discord messages spawn `codex exec`, capture the final answer with `--output-last-message`, and send that text back to `#codex`. Set `CODEX_SESSION_MODE=pty` only when debugging the older live TUI bridge.
+`CODEX_SESSION_MODE=exec` is the stable path: Discord messages spawn `codex exec`, capture the final answer with `--output-last-message`, and send that text back to `#codex`. The bridge saves its Codex session id in `CODEX_STATE_PATH` and uses `codex exec resume <session_id>` on later turns so Discord keeps native Codex context. Set `CODEX_SESSION_MODE=pty` only when debugging the older live TUI bridge.
+
+Commands in `#codex`:
+
+- `!codex-status` - shows queue depth, mode, saved session id, last success, and last output file.
+- `!codex-restart` - creates a fresh Codex exec session and saves the new session id.
 
 ## Configuration
 
