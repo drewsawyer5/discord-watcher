@@ -1,6 +1,9 @@
 import unittest
+from pathlib import Path
 
-from codex_discord_bridge import classify_message, split_discord_message
+from codex_discord_bridge import DiscordBridgeConfig, build_codex_session, classify_message, split_discord_message
+from codex_exec import CodexExecSession
+from codex_session import CodexSession
 
 
 class CodexDiscordBridgeTests(unittest.TestCase):
@@ -25,6 +28,34 @@ class CodexDiscordBridgeTests(unittest.TestCase):
         self.assertEqual(chunks, ["abc\ndef", "ghi"])
         self.assertTrue(all(len(chunk) <= 7 for chunk in chunks))
         self.assertEqual("\n".join(chunks), "abc\ndef\nghi")
+
+    def test_build_codex_session_defaults_to_exec_session(self):
+        config = DiscordBridgeConfig(
+            token="token",
+            codex_channel_id=123,
+            drew_user_id=None,
+            workspace=Path(r"C:\workspace"),
+            turn_timeout_seconds=180,
+            log_path=Path("raw.log"),
+            output_dir=Path("outputs"),
+            session_mode="exec",
+        )
+
+        self.assertIsInstance(build_codex_session(config), CodexExecSession)
+
+    def test_build_codex_session_can_create_pty_session(self):
+        config = DiscordBridgeConfig(
+            token="token",
+            codex_channel_id=123,
+            drew_user_id=None,
+            workspace=Path(r"C:\workspace"),
+            turn_timeout_seconds=180,
+            log_path=Path("raw.log"),
+            output_dir=Path("outputs"),
+            session_mode="pty",
+        )
+
+        self.assertIsInstance(build_codex_session(config), CodexSession)
 
 
 if __name__ == "__main__":

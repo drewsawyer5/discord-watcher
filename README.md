@@ -33,7 +33,8 @@ A PowerShell supervisor (`supervisor.ps1`) keeps the watcher processes running a
 Lane 1 Codex bridge files:
 
 - `codex_discord_bridge.py` - Discord gateway for `#codex`
-- `codex_session.py` - persistent Codex PTY session wrapper
+- `codex_exec.py` - stable default runner; sends each prompt through `codex exec`
+- `codex_session.py` - experimental persistent Codex PTY session wrapper for later live TUI/status work
 - `launch_codex_bridge.bat` - starts the bridge script
 
 Environment:
@@ -42,7 +43,11 @@ Environment:
 CODEX_CHANNEL_ID=1475166363201962077
 CODEX_WORKSPACE=C:\Users\drews\Life Org
 CODEX_TURN_TIMEOUT_SECONDS=180
+CODEX_SESSION_MODE=exec
+CODEX_OUTPUT_DIR=C:\Users\drews\Life Org\Drew_code\discord-watcher-codex-bridge\codex_exec_outputs
 ```
+
+`CODEX_SESSION_MODE=exec` is the stable path: Discord messages spawn `codex exec`, capture the final answer with `--output-last-message`, and send that text back to `#codex`. Set `CODEX_SESSION_MODE=pty` only when debugging the older live TUI bridge.
 
 ## Configuration
 

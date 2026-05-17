@@ -10,6 +10,7 @@ build/
 .venv/
 venv/
 *.log
+codex_exec_outputs/
 *_state.json
 status.json
 twitter_cookies.json

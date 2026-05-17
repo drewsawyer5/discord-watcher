@@ -11,6 +11,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from codex_exec import CodexExecConfig, CodexExecRunner, CodexExecSession
 from codex_session import CodexSession, CodexSessionConfig
 
 
@@ -36,6 +37,8 @@ class DiscordBridgeConfig:
     workspace: Path
     turn_timeout_seconds: int
     log_path: Path
+    output_dir: Path
+    session_mode: str
 
 
 def setup_logging() -> None:
@@ -60,6 +63,8 @@ def load_config() -> DiscordBridgeConfig:
         workspace=Path(os.getenv("CODEX_WORKSPACE", str(DEFAULT_WORKSPACE))),
         turn_timeout_seconds=int(os.getenv("CODEX_TURN_TIMEOUT_SECONDS", "180")),
         log_path=Path(os.getenv("CODEX_RAW_LOG_PATH", str(REPO_DIR / "codex_discord_bridge_raw.log"))),
+        output_dir=Path(os.getenv("CODEX_OUTPUT_DIR", str(REPO_DIR / "codex_exec_outputs"))),
+        session_mode=os.getenv("CODEX_SESSION_MODE", "exec").strip().lower(),
     )
 
 
@@ -99,6 +104,29 @@ def split_discord_message(content: str, limit: int = MAX_DISCORD_MESSAGE_LENGTH)
 def _optional_int(value: str) -> int | None:
     value = value.strip()
     return int(value) if value else None
+
+
+def build_codex_session(config: DiscordBridgeConfig) -> object:
+    """Build the bridge session implementation selected by configuration."""
+    if config.session_mode == "pty":
+        return CodexSession(
+            CodexSessionConfig(
+                workspace=config.workspace,
+                log_path=config.log_path,
+                turn_timeout_seconds=config.turn_timeout_seconds,
+            )
+        )
+    if config.session_mode != "exec":
+        raise ValueError(f"Unsupported CODEX_SESSION_MODE: {config.session_mode}")
+    return CodexExecSession(
+        CodexExecRunner(
+            CodexExecConfig(
+                workspace=config.workspace,
+                output_dir=config.output_dir,
+                timeout_seconds=config.turn_timeout_seconds,
+            )
+        )
+    )
 
 
 class CodexDiscordBridge:
@@ -158,20 +186,14 @@ def main() -> None:
     if args.dry_run:
         print(
             "Codex Discord bridge config OK "
-            f"(channel={config.codex_channel_id}, workspace={config.workspace})"
+            f"(channel={config.codex_channel_id}, workspace={config.workspace}, mode={config.session_mode})"
         )
         return
 
     intents = discord.Intents.default()
     intents.message_content = True
     client = discord.Client(intents=intents)
-    session = CodexSession(
-        CodexSessionConfig(
-            workspace=config.workspace,
-            log_path=config.log_path,
-            turn_timeout_seconds=config.turn_timeout_seconds,
-        )
-    )
+    session = build_codex_session(config)
     bridge = CodexDiscordBridge(config, session)
     worker_task: asyncio.Task[None] | None = None
 
