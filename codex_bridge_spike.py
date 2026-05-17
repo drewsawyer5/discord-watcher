@@ -5,6 +5,7 @@ import queue
 import sys
 import threading
 import time
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -14,6 +15,13 @@ from codex_terminal import extract_turn_text, is_ready_screen
 
 DEFAULT_WORKSPACE = Path(r"C:\Users\drews\Life Org")
 DEFAULT_LOG_PATH = Path(__file__).parent / "codex_bridge_spike.log"
+
+
+@dataclass(frozen=True)
+class TurnWaitResult:
+    completed: bool
+    best_answer: str = ""
+    reason: str = "timeout"
 
 
 def wait_for_ready(chunks: "queue.Queue[str]", transcript: list[str], timeout_seconds: int) -> bool:
@@ -43,7 +51,7 @@ def wait_for_text_after(
     text: str,
     start_index: int,
     timeout_seconds: int,
-) -> bool:
+) -> TurnWaitResult:
     """Wait until specific text appears after a transcript offset.
 
     Args:
@@ -85,6 +93,7 @@ def wait_for_ready_after(
     """
     deadline = time.monotonic() + timeout_seconds
     saw_working = False
+    best_answer = ""
     ready_since: float | None = None
     ready_length = 0
     while time.monotonic() < deadline:
@@ -92,20 +101,58 @@ def wait_for_ready_after(
         drain_chunks(chunks, transcript)
         raw_after_prompt = "".join(transcript)[start_index:]
         current_length = start_index + len(raw_after_prompt)
-        if "Working" in raw_after_prompt or "esc to interrupt" in raw_after_prompt:
-            saw_working = True
-        if saw_working and is_ready_screen(raw_after_prompt):
-            if ready_since is None or current_length != ready_length:
+        saw_working = saw_working or _has_working_marker(raw_after_prompt)
+        best_answer = _best_answer(best_answer, extract_turn_text(raw_after_prompt))
+        completion_reason = _completion_reason(raw_after_prompt, best_answer)
+        if saw_working and completion_reason:
+            if ready_since is None:
                 ready_since = time.monotonic()
                 ready_length = current_length
             elif time.monotonic() - ready_since >= settle_seconds:
-                return True
+                return TurnWaitResult(True, best_answer, completion_reason)
         else:
             ready_since = None
         if current_length != before_length:
             ready_length = current_length
         time.sleep(0.25)
-    return False
+    drain_chunks(chunks, transcript)
+    raw_after_prompt = "".join(transcript)[start_index:]
+    best_answer = _best_answer(best_answer, extract_turn_text(raw_after_prompt))
+    completion_reason = _completion_reason(raw_after_prompt, best_answer)
+    if _has_working_marker(raw_after_prompt) and completion_reason:
+        return TurnWaitResult(True, best_answer, completion_reason)
+    return TurnWaitResult(False, best_answer, "timeout")
+
+
+def _has_working_marker(raw_after_prompt: str) -> bool:
+    return "Working" in raw_after_prompt or "esc to interrupt" in raw_after_prompt
+
+
+def _completion_reason(raw_after_prompt: str, best_answer: str = "") -> str:
+    if is_ready_screen(raw_after_prompt):
+        return "ready_screen"
+    if _has_answer_with_status(raw_after_prompt, best_answer):
+        return "answer_with_model_status"
+    return ""
+
+
+def _has_extractable_answer_with_status(raw_after_prompt: str) -> bool:
+    """Return true when Codex answered and the TUI shows model status again."""
+    return _has_answer_with_status(raw_after_prompt, extract_turn_text(raw_after_prompt))
+
+
+def _has_answer_with_status(raw_after_prompt: str, answer: str) -> bool:
+    if not answer:
+        return False
+    return "gpt-5.5 default" in raw_after_prompt or "gpt-5.4 default" in raw_after_prompt
+
+
+def _best_answer(current: str, candidate: str) -> str:
+    if not candidate:
+        return current
+    if not current or len(candidate) >= len(current):
+        return candidate
+    return current
 
 
 def drain_chunks(chunks: "queue.Queue[str]", transcript: list[str]) -> None:
@@ -220,7 +267,8 @@ def run_spike(prompt: str, workspace: Path, log_path: Path, timeout_seconds: int
             print_text(extract_turn_text(raw[start_index:]))
             return 1
 
-        if not wait_for_ready_after(chunks, transcript, start_index, timeout_seconds):
+        turn_wait = wait_for_ready_after(chunks, transcript, start_index, timeout_seconds)
+        if not turn_wait.completed and not turn_wait.best_answer:
             drain_chunks(chunks, transcript)
             raw = "".join(transcript)
             write_raw_log(log_path, prompt, raw)
@@ -231,7 +279,7 @@ def run_spike(prompt: str, workspace: Path, log_path: Path, timeout_seconds: int
         drain_chunks(chunks, transcript)
         raw = "".join(transcript)
         write_raw_log(log_path, prompt, raw)
-        print_text(extract_turn_text(raw[start_index:]))
+        print_text(extract_turn_text(raw[start_index:]) or turn_wait.best_answer)
         return 0
     finally:
         stop_event.set()

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import queue
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -82,32 +83,58 @@ class CodexSession:
 
     def ask(self, prompt: str) -> str:
         """Send one prompt to Codex and return a minimally cleaned final answer."""
+        turn_id = time.strftime("%Y%m%d-%H%M%S")
+        self._log_turn(turn_id, "start", f"prompt_len={len(prompt)}")
         self.start()
         with self._lock:
             controller = self._require_controller()
             timeout = self.config.turn_timeout_seconds
             if not wait_for_ready(self._chunks, self._transcript, timeout):
                 self._write_current_log(prompt)
+                self._log_turn(turn_id, "error", "initial_ready_timeout")
                 raise TimeoutError("Codex did not become ready before timeout")
+            self._log_turn(turn_id, "session_ready")
 
             start_index = len("".join(self._transcript))
             controller.send_prompt(prompt)
+            self._log_turn(turn_id, "prompt_sent")
             if not wait_for_text_after(self._chunks, self._transcript, prompt, start_index, timeout):
                 self._write_current_log(prompt)
+                self._log_turn(turn_id, "error", "prompt_echo_timeout")
                 raise TimeoutError("Codex did not echo the prompt before timeout")
+            self._log_turn(turn_id, "prompt_echoed")
 
-            if not wait_for_ready_after(self._chunks, self._transcript, start_index, timeout):
+            turn_wait = wait_for_ready_after(self._chunks, self._transcript, start_index, timeout)
+            if turn_wait.best_answer:
+                self._log_turn(
+                    turn_id,
+                    "answer_seen",
+                    f"len={len(turn_wait.best_answer)} preview={turn_wait.best_answer[:120]!r}",
+                )
+            if not turn_wait.completed and not turn_wait.best_answer:
                 self._write_current_log(prompt)
+                self._log_turn(turn_id, "error", f"ready_timeout reason={turn_wait.reason}")
                 raise TimeoutError("Codex did not return to ready before timeout")
+            self._log_turn(turn_id, "turn_observed", f"completed={turn_wait.completed} reason={turn_wait.reason}")
 
             drain_chunks(self._chunks, self._transcript)
             raw = "".join(self._transcript)
             write_raw_log(self.config.log_path, prompt, raw)
-            return extract_turn_text(raw[start_index:])
+            final_answer = extract_turn_text(raw[start_index:])
+            answer = final_answer or turn_wait.best_answer
+            self._log_turn(turn_id, "reply_selected", f"len={len(answer)} final_len={len(final_answer)} best_len={len(turn_wait.best_answer)}")
+            return answer
 
     def _write_current_log(self, prompt: str) -> None:
         drain_chunks(self._chunks, self._transcript)
         write_raw_log(self.config.log_path, prompt, "".join(self._transcript))
+
+    def _log_turn(self, turn_id: str, stage: str, detail: str = "") -> None:
+        line = f"{time.strftime('%Y-%m-%d %H:%M:%S')} turn_id={turn_id} stage={stage}"
+        if detail:
+            line += f" {detail}"
+        with (self.config.log_path.parent / "codex_discord_bridge_turns.log").open("a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
 
     def _require_controller(self) -> CodexProcessController:
         if self._controller is None:

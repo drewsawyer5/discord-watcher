@@ -68,6 +68,71 @@ class CodexTerminalTests(unittest.TestCase):
 
         self.assertEqual(text, "codex bridge spike script ok")
 
+    def test_extract_turn_text_filters_tool_card_before_answer(self):
+        raw = (
+            "• Ran Get-Content -Path 'C:\\Users\\drews\\.codex\\plugins\\cache\\openai-curated\\superpowers\\SKILL.md'\n"
+            "  └ ---\n"
+            "    name: using-superpowers\n"
+            "    ... +116 lines (ctrl + t to view transcript)\n"
+            "    Instructions say WHAT, not HOW. \"Add X\" or \"Fix Y\" doesn't mean skip\n"
+            "    workflows.\n"
+            "• codex discord e2e ok\n"
+        )
+
+        text = extract_turn_text(raw)
+
+        self.assertEqual(text, "codex discord e2e ok")
+
+    def test_extract_turn_text_prefers_text_after_long_separator(self):
+        raw = (
+            "Earlier stale answer\n"
+            "â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€\n"
+            "codex discord e2e ok\n"
+        )
+
+        text = extract_turn_text(raw)
+
+        self.assertEqual(text, "codex discord e2e ok")
+
+    def test_extract_turn_text_keeps_answer_before_final_separator(self):
+        raw = (
+            "â€¢ codex discord e2e ok.\n"
+            "â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€\n"
+            "â€º Write tests for @filename\n"
+            "gpt-5.5 default Â· ~\\Life Org\n"
+        )
+
+        text = extract_turn_text(raw)
+
+        self.assertEqual(text, "codex discord e2e ok.")
+
+    def test_extract_turn_text_handles_answer_smashed_into_ready_prompt(self):
+        raw = "â€¢ codex discord e2e okWogâ€ºImplement {feature}gpt-5.5 default Â· ~\\Life Org"
+
+        text = extract_turn_text(raw)
+
+        self.assertEqual(text, "codex discord e2e ok")
+
+    def test_extract_turn_text_filters_spinner_fragments_before_answer(self):
+        raw = (
+            "l◦in3WngWogorrkkiinng•g\n"
+            "â€¢ codex discord e2e okWogâ€ºImplement {feature}gpt-5.5 default Â· ~\\Life Org"
+        )
+
+        text = extract_turn_text(raw)
+
+        self.assertEqual(text, "codex discord e2e ok")
+
+    def test_extract_turn_text_filters_long_spinner_fragments_before_answer(self):
+        raw = (
+            "WWoorrkkiin1WngWog•orrkkiinngg◦2•WWoorrkki◦in3WngWogorrkkiinng•g\n"
+            "â€¢ codex discord e2e okWogâ€ºImplement {feature}gpt-5.5 default Â· ~\\Life Org"
+        )
+
+        text = extract_turn_text(raw)
+
+        self.assertEqual(text, "codex discord e2e ok")
+
 
 if __name__ == "__main__":
     unittest.main()
