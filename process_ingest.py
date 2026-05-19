@@ -35,6 +35,9 @@ from discord_client import (
     post_discord_reply,
 )
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import discord_voice
+
 # Load shared Drew_code/.env (one level up from this repo)
 _env_path = Path(__file__).parent.parent / ".env"
 load_dotenv(_env_path)
@@ -583,25 +586,11 @@ def run_ingest(url: str, message_id: str, drew_context: str = "") -> bool:
 # Voice ingest
 # ---------------------------------------------------------------------------
 def transcribe_attachment(att: dict) -> str:
-    """Download an audio attachment from Discord and transcribe with faster-whisper."""
-    cdn_url = att["url"]
-    suffix = Path(att.get("filename", "audio.ogg")).suffix or ".ogg"
-    log.info(f"Downloading voice attachment: {att.get('filename')}")
-
-    resp = requests.get(cdn_url, headers=_discord_headers(), timeout=30)
-    resp.raise_for_status()
-
-    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-        tmp.write(resp.content)
-        tmp_path = Path(tmp.name)
-
-    try:
-        segments, _ = get_whisper_model().transcribe(str(tmp_path), language="en", condition_on_previous_text=False)
-        transcript = " ".join(s.text.strip() for s in segments).strip()
-        log.info(f"Transcribed ({len(transcript)} chars): {transcript[:80]}...")
-        return transcript
-    finally:
-        tmp_path.unlink(missing_ok=True)
+    """Download an audio attachment from Discord and transcribe it."""
+    log.info(f"Transcribing voice attachment: {att.get('filename')}")
+    transcript = discord_voice.transcribe_attachment_dict(att, headers=_discord_headers())
+    log.info(f"Transcribed ({len(transcript)} chars): {transcript[:80]}...")
+    return transcript
 
 
 def run_ingest_voice(att: dict, message_id: str) -> bool:
@@ -612,8 +601,8 @@ def run_ingest_voice(att: dict, message_id: str) -> bool:
         post_discord_reply(f"⚠️ Voice transcription failed: {e}", message_id)
         return False
 
-    if not transcript:
-        post_discord_reply("⚠️ Voice message was empty or couldn't be transcribed.", message_id)
+    if not discord_voice.is_usable_transcript(transcript):
+        post_discord_reply("Couldn't transcribe that - try again?", message_id)
         return True  # not an LLM failure — don't re-queue
 
     filename = att.get("filename", "voice.ogg")
@@ -881,7 +870,7 @@ def check_pdf_drop_folder(state: dict):
 # ---------------------------------------------------------------------------
 def has_audio_attachment(msg: dict) -> bool:
     return any(
-        Path(a.get("filename", "")).suffix.lower() in AUDIO_EXTENSIONS
+        discord_voice.is_audio_attachment_dict(a)
         for a in msg.get("attachments", [])
     )
 
@@ -937,14 +926,30 @@ def _process_message(msg: dict) -> bool:
 
     for url in URL_RE.findall(full_content):
         ok = run_ingest(url, msg_id, drew_context=drew_context) and ok
-    for att in msg.get("attachments", []):
+    attachments = msg.get("attachments", [])
+    audio_att, ignored_audio_count = discord_voice.select_first_audio_attachment_dict(attachments)
+    if audio_att is not None:
+        if ignored_audio_count:
+            post_discord_reply(f"Ignored {ignored_audio_count} extra audio attachment{'s' if ignored_audio_count != 1 else ''}.", msg_id)
+        ok = run_ingest_voice(audio_att, msg_id) and ok
+
+    ignored_non_audio = False
+    for att in attachments:
         suffix = Path(att.get("filename", "")).suffix.lower()
         if suffix in AUDIO_EXTENSIONS:
-            ok = run_ingest_voice(att, msg_id) and ok
+            continue
         elif suffix in IMAGE_EXTENSIONS:
+            if audio_att is not None:
+                ignored_non_audio = True
+                continue
             ok = run_ingest_image(att, msg_id, drew_context=drew_context) and ok
         elif suffix in PDF_EXTENSIONS:
+            if audio_att is not None:
+                ignored_non_audio = True
+                continue
             ok = run_ingest_pdf(att, msg_id, drew_context=drew_context) and ok
+    if ignored_non_audio:
+        post_discord_reply("Ignored non-audio attachment(s).", msg_id)
     if is_text_drop(msg):
         ok = run_ingest_text(full_content.strip(), msg_id) and ok
     return ok
