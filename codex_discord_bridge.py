@@ -15,6 +15,9 @@ from dotenv import load_dotenv
 from codex_exec import CodexBridgeState, CodexExecConfig, CodexExecRunner, CodexExecSession
 from codex_session import CodexSession, CodexSessionConfig
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "discord-watcher"))
+import discord_voice
+
 
 if sys.stdout.encoding != "utf-8":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -109,6 +112,45 @@ def split_discord_message(content: str, limit: int = MAX_DISCORD_MESSAGE_LENGTH)
 def _optional_int(value: str) -> int | None:
     value = value.strip()
     return int(value) if value else None
+
+
+def build_prompt_from_message(message: object, transcribe: Callable[[object], str]) -> tuple[str | None, str]:
+    """Build a Codex prompt from text or the first audio attachment."""
+    content = str(getattr(message, "content", "") or "").strip()
+    attachments = list(getattr(message, "attachments", []) or [])
+    audio_attachment, ignored_audio_count = discord_voice.select_first_audio_attachment(attachments)
+    if audio_attachment is None:
+        return content, ""
+
+    transcript = transcribe(audio_attachment).strip()
+    if not discord_voice.is_usable_transcript(transcript):
+        return None, "Couldn't transcribe that - try again?"
+
+    warnings = []
+    if ignored_audio_count:
+        warnings.append(f"Ignored {ignored_audio_count} extra audio attachment{'s' if ignored_audio_count != 1 else ''}.")
+    if len(attachments) > ignored_audio_count + 1:
+        warnings.append("Ignored non-audio attachment(s).")
+    return discord_voice.format_voice_prompt(transcript, content), " ".join(warnings)
+
+
+async def build_prompt_from_message_async(message: object) -> tuple[str | None, str]:
+    content = str(getattr(message, "content", "") or "").strip()
+    attachments = list(getattr(message, "attachments", []) or [])
+    audio_attachment, ignored_audio_count = discord_voice.select_first_audio_attachment(attachments)
+    if audio_attachment is None:
+        return content, ""
+
+    transcript = (await discord_voice.transcribe_attachment(audio_attachment)).strip()
+    if not discord_voice.is_usable_transcript(transcript):
+        return None, "Couldn't transcribe that - try again?"
+
+    warnings = []
+    if ignored_audio_count:
+        warnings.append(f"Ignored {ignored_audio_count} extra audio attachment{'s' if ignored_audio_count != 1 else ''}.")
+    if len(attachments) > ignored_audio_count + 1:
+        warnings.append("Ignored non-audio attachment(s).")
+    return discord_voice.format_voice_prompt(transcript, content), " ".join(warnings)
 
 
 def build_codex_session(config: DiscordBridgeConfig) -> object:
@@ -246,7 +288,11 @@ def main() -> None:
         elif action == "status":
             await bridge.status(message)
         else:
-            await bridge.enqueue_prompt(message, message.content)
+            prompt, warning = await build_prompt_from_message_async(message)
+            if warning:
+                await message.reply(warning)
+            if prompt:
+                await bridge.enqueue_prompt(message, prompt)
 
     client.run(config.token)
 

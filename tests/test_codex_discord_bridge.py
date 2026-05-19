@@ -2,7 +2,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock
 
-from codex_discord_bridge import DiscordBridgeConfig, build_codex_session, classify_message, split_discord_message
+from codex_discord_bridge import DiscordBridgeConfig, build_codex_session, build_prompt_from_message, classify_message, split_discord_message
 from codex_exec import CodexBridgeState, CodexExecSession
 from codex_session import CodexSession
 
@@ -29,6 +29,33 @@ class CodexDiscordBridgeTests(unittest.TestCase):
         self.assertEqual(chunks, ["abc\ndef", "ghi"])
         self.assertTrue(all(len(chunk) <= 7 for chunk in chunks))
         self.assertEqual("\n".join(chunks), "abc\ndef\nghi")
+
+    def test_build_prompt_from_message_uses_first_audio_transcript_and_typed_note(self):
+        message = Mock()
+        message.content = "also commit"
+        first_audio = Mock(filename="first.ogg", content_type="audio/ogg")
+        second_audio = Mock(filename="second.m4a", content_type="audio/mp4")
+        image = Mock(filename="photo.jpg", content_type="image/jpeg")
+        message.attachments = [first_audio, image, second_audio]
+
+        prompt, warning = build_prompt_from_message(message, transcribe=lambda attachment: "please fix the test suite")
+
+        self.assertEqual(
+            prompt,
+            "Voice transcript:\nplease fix the test suite\n\nTyped note:\nalso commit",
+        )
+        self.assertIn("Ignored 1 extra audio attachment", warning)
+        self.assertIn("Ignored non-audio attachment", warning)
+
+    def test_build_prompt_from_message_rejects_garbled_voice_without_codex_prompt(self):
+        message = Mock()
+        message.content = ""
+        message.attachments = [Mock(filename="noise.ogg", content_type="audio/ogg")]
+
+        prompt, warning = build_prompt_from_message(message, transcribe=lambda attachment: "...")
+
+        self.assertIsNone(prompt)
+        self.assertEqual(warning, "Couldn't transcribe that - try again?")
 
     def test_build_codex_session_defaults_to_exec_session(self):
         config = DiscordBridgeConfig(
