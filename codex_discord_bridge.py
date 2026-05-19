@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+import requests
 from dotenv import load_dotenv
 
 from codex_exec import CodexBridgeState, CodexExecConfig, CodexExecRunner, CodexExecSession
@@ -134,6 +135,38 @@ def build_prompt_from_message(message: object, transcribe: Callable[[object], st
     return discord_voice.format_voice_prompt(transcript, content), " ".join(warnings)
 
 
+def build_prompt_from_message_payload(
+    payload: dict,
+    transcribe: Callable[[dict], str],
+) -> tuple[str | None, str]:
+    content = str(payload.get("content", "") or "").strip()
+    attachments = list(payload.get("attachments", []) or [])
+    audio_attachment, ignored_audio_count = discord_voice.select_first_audio_attachment_dict(attachments)
+    if audio_attachment is None:
+        return content, ""
+
+    transcript = transcribe(audio_attachment).strip()
+    if not discord_voice.is_usable_transcript(transcript):
+        return None, "Couldn't transcribe that - try again?"
+
+    warnings = []
+    if ignored_audio_count:
+        warnings.append(f"Ignored {ignored_audio_count} extra audio attachment{'s' if ignored_audio_count != 1 else ''}.")
+    if len(attachments) > ignored_audio_count + 1:
+        warnings.append("Ignored non-audio attachment(s).")
+    return discord_voice.format_voice_prompt(transcript, content), " ".join(warnings)
+
+
+def fetch_message_payload(config: DiscordBridgeConfig, message_id: int | str) -> dict:
+    response = requests.get(
+        f"https://discord.com/api/v10/channels/{config.codex_channel_id}/messages/{message_id}",
+        headers={"Authorization": f"Bot {config.token}"},
+        timeout=20,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
 async def build_prompt_from_message_async(message: object) -> tuple[str | None, str]:
     content = str(getattr(message, "content", "") or "").strip()
     attachments = list(getattr(message, "attachments", []) or [])
@@ -151,6 +184,41 @@ async def build_prompt_from_message_async(message: object) -> tuple[str | None, 
     if len(attachments) > ignored_audio_count + 1:
         warnings.append("Ignored non-audio attachment(s).")
     return discord_voice.format_voice_prompt(transcript, content), " ".join(warnings)
+
+
+async def build_prompt_for_bridge(config: DiscordBridgeConfig, message: object) -> tuple[str | None, str]:
+    attachments = list(getattr(message, "attachments", []) or [])
+    audio_attachment, _ = discord_voice.select_first_audio_attachment(attachments)
+    content = str(getattr(message, "content", "") or "").strip()
+    message_id = getattr(message, "id", "")
+    log.info(
+        "message_input id=%s content_chars=%s attachments=%s audio_detected=%s",
+        message_id,
+        len(content),
+        len(attachments),
+        bool(audio_attachment),
+    )
+    if audio_attachment is not None:
+        return await build_prompt_from_message_async(message)
+
+    if content.lower() == "voice transcript:" or int(getattr(message, "flags", 0) or 0) & 8192:
+        log.info("message_fetch_fallback id=%s reason=voice_without_gateway_audio", message_id)
+        payload = await asyncio.to_thread(fetch_message_payload, config, message_id)
+        prompt, warning = await asyncio.to_thread(
+            build_prompt_from_message_payload,
+            payload,
+            lambda attachment: discord_voice.transcribe_attachment_dict(attachment),
+        )
+        log.info(
+            "message_fetch_fallback_result id=%s rest_attachments=%s prompt_chars=%s warning=%s",
+            message_id,
+            len(payload.get("attachments", []) or []),
+            len(prompt or ""),
+            warning,
+        )
+        return prompt, warning
+
+    return content, ""
 
 
 def build_codex_session(config: DiscordBridgeConfig) -> object:
@@ -288,7 +356,7 @@ def main() -> None:
         elif action == "status":
             await bridge.status(message)
         else:
-            prompt, warning = await build_prompt_from_message_async(message)
+            prompt, warning = await build_prompt_for_bridge(config, message)
             if warning:
                 await message.reply(warning)
             if prompt:

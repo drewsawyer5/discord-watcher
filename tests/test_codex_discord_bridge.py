@@ -2,7 +2,14 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock
 
-from codex_discord_bridge import DiscordBridgeConfig, build_codex_session, build_prompt_from_message, classify_message, split_discord_message
+from codex_discord_bridge import (
+    DiscordBridgeConfig,
+    build_codex_session,
+    build_prompt_from_message,
+    build_prompt_from_message_payload,
+    classify_message,
+    split_discord_message,
+)
 from codex_exec import CodexBridgeState, CodexExecSession
 from codex_session import CodexSession
 
@@ -56,6 +63,26 @@ class CodexDiscordBridgeTests(unittest.TestCase):
 
         self.assertIsNone(prompt)
         self.assertEqual(warning, "Couldn't transcribe that - try again?")
+
+    def test_build_prompt_from_message_payload_uses_rest_attachment_when_event_misses_it(self):
+        payload = {
+            "content": "",
+            "attachments": [
+                {
+                    "filename": "voice-message.ogg",
+                    "content_type": "audio/ogg",
+                    "url": "https://cdn.example/voice-message.ogg",
+                }
+            ],
+        }
+
+        prompt, warning = build_prompt_from_message_payload(
+            payload,
+            transcribe=lambda attachment: "please use the rest attachment",
+        )
+
+        self.assertEqual(prompt, "Voice transcript:\nplease use the rest attachment")
+        self.assertEqual(warning, "")
 
     def test_build_codex_session_defaults_to_exec_session(self):
         config = DiscordBridgeConfig(
