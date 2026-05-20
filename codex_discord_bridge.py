@@ -5,7 +5,9 @@ import argparse
 import logging
 import logging.handlers
 import os
+import re
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -46,6 +48,8 @@ class DiscordBridgeConfig:
     state_path: Path
     turn_log_path: Path
     session_mode: str
+    voice_dir: Path
+    voice_ready_delay_seconds: float
 
 
 def setup_logging() -> None:
@@ -74,6 +78,8 @@ def load_config() -> DiscordBridgeConfig:
         state_path=Path(os.getenv("CODEX_STATE_PATH", str(REPO_DIR / "codex_bridge_state.json"))),
         turn_log_path=Path(os.getenv("CODEX_TURN_LOG_PATH", str(REPO_DIR / "codex_exec_turns.log"))),
         session_mode=os.getenv("CODEX_SESSION_MODE", "exec").strip().lower(),
+        voice_dir=Path(os.getenv("CODEX_VOICE_DIR", str(REPO_DIR / "codex_voice_messages"))),
+        voice_ready_delay_seconds=float(os.getenv("CODEX_VOICE_READY_DELAY_SECONDS", "1.0")),
     )
 
 
@@ -157,6 +163,58 @@ def build_prompt_from_message_payload(
     return discord_voice.format_voice_prompt(transcript, content), " ".join(warnings)
 
 
+def _safe_filename(value: str) -> str:
+    value = re.sub(r"[^A-Za-z0-9_.-]+", "-", value.strip())
+    return value.strip("-") or "voice-message"
+
+
+def download_attachment_bytes(attachment: dict) -> bytes:
+    response = requests.get(attachment["url"], timeout=30)
+    response.raise_for_status()
+    return response.content
+
+
+def transcribe_payload_audio_to_sidecar(
+    payload: dict,
+    voice_dir: Path,
+    download: Callable[[dict], bytes] = download_attachment_bytes,
+    transcribe_file: Callable[[Path], str] = discord_voice.transcribe_file,
+) -> tuple[str | None, str]:
+    content = str(payload.get("content", "") or "").strip()
+    attachments = list(payload.get("attachments", []) or [])
+    audio_attachment, ignored_audio_count = discord_voice.select_first_audio_attachment_dict(attachments)
+    if audio_attachment is None:
+        return content, ""
+
+    message_id = _safe_filename(str(payload.get("id", "") or "message"))
+    attachment_id = _safe_filename(str(audio_attachment.get("id", "") or "attachment"))
+    filename = _safe_filename(str(audio_attachment.get("filename", "") or "voice-message.ogg"))
+    if not Path(filename).suffix:
+        filename += ".ogg"
+
+    voice_dir.mkdir(parents=True, exist_ok=True)
+    audio_path = voice_dir / f"{message_id}-{attachment_id}-{filename}"
+    txt_path = audio_path.with_suffix(".txt")
+
+    if txt_path.exists():
+        transcript = txt_path.read_text(encoding="utf-8").strip()
+    else:
+        audio_bytes = download(audio_attachment)
+        audio_path.write_bytes(audio_bytes)
+        transcript = transcribe_file(audio_path).strip()
+        txt_path.write_text(transcript, encoding="utf-8")
+
+    if not discord_voice.is_usable_transcript(transcript):
+        return None, "Couldn't transcribe that - try again?"
+
+    warnings = []
+    if ignored_audio_count:
+        warnings.append(f"Ignored {ignored_audio_count} extra audio attachment{'s' if ignored_audio_count != 1 else ''}.")
+    if len(attachments) > ignored_audio_count + 1:
+        warnings.append("Ignored non-audio attachment(s).")
+    return discord_voice.format_voice_prompt(transcript, content), " ".join(warnings)
+
+
 def fetch_message_payload(config: DiscordBridgeConfig, message_id: int | str) -> dict:
     response = requests.get(
         f"https://discord.com/api/v10/channels/{config.codex_channel_id}/messages/{message_id}",
@@ -201,18 +259,21 @@ async def build_prompt_for_bridge(config: DiscordBridgeConfig, message: object) 
     if audio_attachment is not None or content.lower() == "voice transcript:" or int(getattr(message, "flags", 0) or 0) & 8192:
         reason = "gateway_audio" if audio_attachment is not None else "voice_without_gateway_audio"
         log.info("message_fetch_fallback id=%s reason=%s", message_id, reason)
+        if config.voice_ready_delay_seconds > 0:
+            await asyncio.sleep(config.voice_ready_delay_seconds)
         payload = await asyncio.to_thread(fetch_message_payload, config, message_id)
         prompt, warning = await asyncio.to_thread(
-            build_prompt_from_message_payload,
+            transcribe_payload_audio_to_sidecar,
             payload,
-            lambda attachment: discord_voice.transcribe_attachment_dict(attachment),
+            config.voice_dir,
         )
         log.info(
-            "message_fetch_fallback_result id=%s rest_attachments=%s prompt_chars=%s warning=%s",
+            "message_fetch_fallback_result id=%s rest_attachments=%s prompt_chars=%s warning=%s voice_dir=%s",
             message_id,
             len(payload.get("attachments", []) or []),
             len(prompt or ""),
             warning,
+            config.voice_dir,
         )
         return prompt, warning
 

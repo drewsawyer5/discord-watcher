@@ -10,6 +10,7 @@ from codex_discord_bridge import (
     build_prompt_from_message_payload,
     classify_message,
     split_discord_message,
+    transcribe_payload_audio_to_sidecar,
 )
 from codex_exec import CodexBridgeState, CodexExecSession
 from codex_session import CodexSession
@@ -85,6 +86,38 @@ class CodexDiscordBridgeTests(unittest.TestCase):
         self.assertEqual(prompt, "Voice transcript:\nplease use the rest attachment")
         self.assertEqual(warning, "")
 
+    def test_transcribe_payload_audio_to_sidecar_writes_ogg_and_txt_before_prompt(self):
+        import tempfile
+
+        payload = {
+            "id": "msg-123",
+            "content": "typed note",
+            "attachments": [
+                {
+                    "id": "att-456",
+                    "filename": "voice-message.ogg",
+                    "content_type": "audio/ogg",
+                    "url": "https://cdn.example/voice-message.ogg",
+                }
+            ],
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            prompt, warning = transcribe_payload_audio_to_sidecar(
+                payload,
+                Path(tmp),
+                download=lambda attachment: b"OggS test audio",
+                transcribe_file=lambda path: "sidecar transcript works",
+            )
+            ogg = Path(tmp) / "msg-123-att-456-voice-message.ogg"
+            txt = Path(tmp) / "msg-123-att-456-voice-message.txt"
+
+            self.assertTrue(ogg.exists())
+            self.assertTrue(txt.exists())
+            self.assertEqual(txt.read_text(encoding="utf-8"), "sidecar transcript works")
+            self.assertEqual(prompt, "Voice transcript:\nsidecar transcript works\n\nTyped note:\ntyped note")
+            self.assertEqual(warning, "")
+
     def test_build_prompt_for_bridge_fetches_rest_payload_for_gateway_audio(self):
         import asyncio
 
@@ -99,6 +132,8 @@ class CodexDiscordBridgeTests(unittest.TestCase):
             state_path=Path("state.json"),
             turn_log_path=Path("turns.log"),
             session_mode="exec",
+            voice_dir=Path("voice"),
+            voice_ready_delay_seconds=0,
         )
         message = Mock()
         message.id = 456
@@ -116,7 +151,11 @@ class CodexDiscordBridgeTests(unittest.TestCase):
 
             with (
                 patch.object(codex_discord_bridge, "fetch_message_payload", return_value=payload),
-                patch.object(codex_discord_bridge.discord_voice, "transcribe_attachment_dict", return_value="rest transcript works"),
+                patch.object(
+                    codex_discord_bridge,
+                    "transcribe_payload_audio_to_sidecar",
+                    return_value=("Voice transcript:\nrest transcript works", ""),
+                ),
             ):
                 return await build_prompt_for_bridge(config, message)
 
@@ -137,6 +176,8 @@ class CodexDiscordBridgeTests(unittest.TestCase):
             state_path=Path("state.json"),
             turn_log_path=Path("turns.log"),
             session_mode="exec",
+            voice_dir=Path("voice"),
+            voice_ready_delay_seconds=0,
         )
 
         self.assertIsInstance(build_codex_session(config), CodexExecSession)
@@ -153,6 +194,8 @@ class CodexDiscordBridgeTests(unittest.TestCase):
             state_path=Path("state.json"),
             turn_log_path=Path("turns.log"),
             session_mode="pty",
+            voice_dir=Path("voice"),
+            voice_ready_delay_seconds=0,
         )
 
         self.assertIsInstance(build_codex_session(config), CodexSession)
@@ -171,6 +214,8 @@ class CodexDiscordBridgeTests(unittest.TestCase):
             state_path=Path("state.json"),
             turn_log_path=Path("turns.log"),
             session_mode="exec",
+            voice_dir=Path("voice"),
+            voice_ready_delay_seconds=0,
         )
         session = Mock()
         bridge = CodexDiscordBridge(config, session, state_loader=lambda path: state)
@@ -210,6 +255,8 @@ class CodexDiscordBridgeTests(unittest.TestCase):
             state_path=Path("state.json"),
             turn_log_path=Path("turns.log"),
             session_mode="exec",
+            voice_dir=Path("voice"),
+            voice_ready_delay_seconds=0,
         )
         session = Mock()
         session.restart.return_value = "019e3735-0000-7000-8000-abcdefabcdef"
