@@ -30,6 +30,7 @@ if sys.stderr.encoding != "utf-8":
 REPO_DIR = Path(__file__).parent
 ENV_PATH = REPO_DIR.parent / ".env"
 DEFAULT_WORKSPACE = Path(r"C:\Users\drews\Life Org")
+DEFAULT_CODEX_VOICE_DIR = DEFAULT_WORKSPACE / "Obsidian" / ".audiofiles" / "codex_bridge"
 DEFAULT_CODEX_CHANNEL_ID = 1475166363201962077
 MAX_DISCORD_MESSAGE_LENGTH = 1900
 
@@ -78,7 +79,7 @@ def load_config() -> DiscordBridgeConfig:
         state_path=Path(os.getenv("CODEX_STATE_PATH", str(REPO_DIR / "codex_bridge_state.json"))),
         turn_log_path=Path(os.getenv("CODEX_TURN_LOG_PATH", str(REPO_DIR / "codex_exec_turns.log"))),
         session_mode=os.getenv("CODEX_SESSION_MODE", "exec").strip().lower(),
-        voice_dir=Path(os.getenv("CODEX_VOICE_DIR", str(REPO_DIR / "codex_voice_messages"))),
+        voice_dir=Path(os.getenv("CODEX_VOICE_DIR", str(DEFAULT_CODEX_VOICE_DIR))),
         voice_ready_delay_seconds=float(os.getenv("CODEX_VOICE_READY_DELAY_SECONDS", "1.0")),
     )
 
@@ -174,11 +175,26 @@ def download_attachment_bytes(attachment: dict) -> bytes:
     return response.content
 
 
+def wait_for_stable_file(path: Path, checks: int = 2, interval_seconds: float = 0.25) -> None:
+    """Wait until a downloaded audio file has stopped changing before transcription."""
+    last_size = -1
+    stable_checks = 0
+    while stable_checks < checks:
+        current_size = path.stat().st_size
+        if current_size == last_size:
+            stable_checks += 1
+        else:
+            stable_checks = 0
+            last_size = current_size
+        time.sleep(interval_seconds)
+
+
 def transcribe_payload_audio_to_sidecar(
     payload: dict,
     voice_dir: Path,
     download: Callable[[dict], bytes] = download_attachment_bytes,
     transcribe_file: Callable[[Path], str] = discord_voice.transcribe_file,
+    wait_for_file: Callable[[Path], None] = wait_for_stable_file,
 ) -> tuple[str | None, str]:
     content = str(payload.get("content", "") or "").strip()
     attachments = list(payload.get("attachments", []) or [])
@@ -201,6 +217,7 @@ def transcribe_payload_audio_to_sidecar(
     else:
         audio_bytes = download(audio_attachment)
         audio_path.write_bytes(audio_bytes)
+        wait_for_file(audio_path)
         transcript = transcribe_file(audio_path).strip()
         txt_path.write_text(transcript, encoding="utf-8")
 

@@ -47,9 +47,12 @@ CODEX_SESSION_MODE=exec
 CODEX_OUTPUT_DIR=C:\Users\drews\Life Org\Drew_code\discord-watcher-codex-bridge\codex_exec_outputs
 CODEX_STATE_PATH=C:\Users\drews\Life Org\Drew_code\discord-watcher-codex-bridge\codex_bridge_state.json
 CODEX_TURN_LOG_PATH=C:\Users\drews\Life Org\Drew_code\discord-watcher-codex-bridge\codex_exec_turns.log
+CODEX_VOICE_DIR=C:\Users\drews\Life Org\Obsidian\.audiofiles\codex_bridge
 ```
 
 `CODEX_SESSION_MODE=exec` is the stable path: Discord messages spawn `codex exec`, capture the final answer with `--output-last-message`, and send that text back to `#codex`. The bridge saves its Codex session id in `CODEX_STATE_PATH` and uses `codex exec resume <session_id>` on later turns so Discord keeps native Codex context. Set `CODEX_SESSION_MODE=pty` only when debugging the older live TUI bridge.
+
+Voice messages in `#codex` are downloaded to `CODEX_VOICE_DIR` first. The bridge waits for the `.ogg` file to stabilize, sends that file to WhisperX/faster-whisper, writes a sibling `.txt`, then sends the transcript text into Codex.
 
 Commands in `#codex`:
 

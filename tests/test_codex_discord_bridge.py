@@ -3,12 +3,14 @@ from pathlib import Path
 from unittest.mock import AsyncMock, Mock
 
 from codex_discord_bridge import (
+    DEFAULT_CODEX_VOICE_DIR,
     DiscordBridgeConfig,
     build_codex_session,
     build_prompt_for_bridge,
     build_prompt_from_message,
     build_prompt_from_message_payload,
     classify_message,
+    load_config,
     split_discord_message,
     transcribe_payload_audio_to_sidecar,
 )
@@ -86,9 +88,41 @@ class CodexDiscordBridgeTests(unittest.TestCase):
         self.assertEqual(prompt, "Voice transcript:\nplease use the rest attachment")
         self.assertEqual(warning, "")
 
+    def test_load_config_defaults_voice_dir_to_obsidian_audiofiles(self):
+        from unittest.mock import patch
+
+        env = {
+            "DISCORD_BOT_TOKEN": "token",
+            "CODEX_CHANNEL_ID": "123",
+        }
+
+        with patch("codex_discord_bridge.load_dotenv"), patch.dict("os.environ", env, clear=True):
+            config = load_config()
+
+        self.assertEqual(config.voice_dir, DEFAULT_CODEX_VOICE_DIR)
+        self.assertEqual(
+            config.voice_dir,
+            Path(r"C:\Users\drews\Life Org\Obsidian\.audiofiles\codex_bridge"),
+        )
+
+    def test_load_config_allows_voice_dir_override(self):
+        from unittest.mock import patch
+
+        env = {
+            "DISCORD_BOT_TOKEN": "token",
+            "CODEX_CHANNEL_ID": "123",
+            "CODEX_VOICE_DIR": r"C:\tmp\codex-voice",
+        }
+
+        with patch("codex_discord_bridge.load_dotenv"), patch.dict("os.environ", env, clear=True):
+            config = load_config()
+
+        self.assertEqual(config.voice_dir, Path(r"C:\tmp\codex-voice"))
+
     def test_transcribe_payload_audio_to_sidecar_writes_ogg_and_txt_before_prompt(self):
         import tempfile
 
+        call_order = []
         payload = {
             "id": "msg-123",
             "content": "typed note",
@@ -106,17 +140,50 @@ class CodexDiscordBridgeTests(unittest.TestCase):
             prompt, warning = transcribe_payload_audio_to_sidecar(
                 payload,
                 Path(tmp),
-                download=lambda attachment: b"OggS test audio",
-                transcribe_file=lambda path: "sidecar transcript works",
+                download=lambda attachment: call_order.append("download") or b"OggS test audio",
+                transcribe_file=lambda path: call_order.append(f"transcribe:{path.name}") or "sidecar transcript works",
+                wait_for_file=lambda path: call_order.append(f"stable:{path.name}"),
             )
             ogg = Path(tmp) / "msg-123-att-456-voice-message.ogg"
             txt = Path(tmp) / "msg-123-att-456-voice-message.txt"
 
             self.assertTrue(ogg.exists())
             self.assertTrue(txt.exists())
+            self.assertEqual(call_order, ["download", "stable:msg-123-att-456-voice-message.ogg", "transcribe:msg-123-att-456-voice-message.ogg"])
             self.assertEqual(txt.read_text(encoding="utf-8"), "sidecar transcript works")
             self.assertEqual(prompt, "Voice transcript:\nsidecar transcript works\n\nTyped note:\ntyped note")
             self.assertEqual(warning, "")
+
+    def test_transcribe_payload_audio_to_sidecar_reuses_existing_txt_without_download(self):
+        import tempfile
+
+        payload = {
+            "id": "msg-123",
+            "content": "",
+            "attachments": [
+                {
+                    "id": "att-456",
+                    "filename": "voice-message.ogg",
+                    "content_type": "audio/ogg",
+                    "url": "https://cdn.example/voice-message.ogg",
+                }
+            ],
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            txt = Path(tmp) / "msg-123-att-456-voice-message.txt"
+            txt.write_text("cached transcript", encoding="utf-8")
+
+            prompt, warning = transcribe_payload_audio_to_sidecar(
+                payload,
+                Path(tmp),
+                download=Mock(side_effect=AssertionError("should not download")),
+                transcribe_file=Mock(side_effect=AssertionError("should not transcribe")),
+                wait_for_file=Mock(side_effect=AssertionError("should not wait")),
+            )
+
+        self.assertEqual(prompt, "Voice transcript:\ncached transcript")
+        self.assertEqual(warning, "")
 
     def test_build_prompt_for_bridge_fetches_rest_payload_for_gateway_audio(self):
         import asyncio
