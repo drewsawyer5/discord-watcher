@@ -1,6 +1,5 @@
 import tempfile
 import unittest
-import subprocess
 import json
 from pathlib import Path
 from unittest.mock import Mock
@@ -87,7 +86,8 @@ class CodexExecRunnerTests(unittest.TestCase):
             args = run_command.call_args.args[0]
             self.assertEqual(args[1:4], ["exec", "resume", "019e3733-ccd7-7791-babc-b67a9c4468e6"])
             self.assertNotIn("--cd", args)
-            self.assertEqual(args[-1], "hello again")
+            self.assertEqual(args[-1], "-")
+            self.assertEqual(run_command.call_args.kwargs["input"], "hello again")
 
     def test_ask_builds_lane1_codex_exec_command(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -120,12 +120,40 @@ class CodexExecRunnerTests(unittest.TestCase):
             self.assertNotIn("--search", args)
             self.assertIn("--skip-git-repo-check", args)
             self.assertIn("-o", args)
-            self.assertEqual(args[-1], "hello")
+            self.assertEqual(args[-1], "-")
             self.assertEqual(run_command.call_args.kwargs["cwd"], str(workspace))
             self.assertEqual(run_command.call_args.kwargs["timeout"], 77)
-            self.assertEqual(run_command.call_args.kwargs["stdin"], subprocess.DEVNULL)
+            self.assertEqual(run_command.call_args.kwargs["input"], "hello")
             self.assertEqual(run_command.call_args.kwargs["encoding"], "utf-8")
             self.assertEqual(run_command.call_args.kwargs["errors"], "replace")
+
+    def test_ask_sends_multiline_prompt_through_stdin(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir) / "workspace"
+            output_dir = Path(temp_dir) / "outputs"
+            workspace.mkdir()
+            run_command = Mock()
+
+            def write_output(args, **kwargs):
+                Path(args[args.index("-o") + 1]).write_text("saw transcript", encoding="utf-8")
+                result = Mock()
+                result.returncode = 0
+                result.stderr = ""
+                result.stdout = "session id: 019e3737-0000-7000-8000-abcdefabcdef\n"
+                return result
+
+            run_command.side_effect = write_output
+            runner = CodexExecRunner(
+                CodexExecConfig(workspace=workspace, output_dir=output_dir),
+                run_command=run_command,
+            )
+            prompt = "Voice transcript:\nthis is the transcript\n\nTyped note:\nplease answer"
+
+            answer = runner.ask(prompt)
+
+            self.assertEqual(answer, "saw transcript")
+            self.assertEqual(run_command.call_args.args[0][-1], "-")
+            self.assertEqual(run_command.call_args.kwargs["input"], prompt)
 
     def test_ask_raises_when_codex_exec_fails(self):
         with tempfile.TemporaryDirectory() as temp_dir:

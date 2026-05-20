@@ -103,7 +103,7 @@ class CodexExecRunner:
             capture_output=True,
             encoding="utf-8",
             errors="replace",
-            stdin=subprocess.DEVNULL,
+            input=prompt,
             text=True,
             timeout=self.config.timeout_seconds,
         )
@@ -165,7 +165,7 @@ class CodexExecRunner:
                 "--skip-git-repo-check",
                 "-o",
                 str(output_path),
-                prompt,
+                "-",
             ]
         )
         return args
