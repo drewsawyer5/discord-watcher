@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, Mock
 from codex_discord_bridge import (
     DiscordBridgeConfig,
     build_codex_session,
+    build_prompt_for_bridge,
     build_prompt_from_message,
     build_prompt_from_message_payload,
     classify_message,
@@ -82,6 +83,46 @@ class CodexDiscordBridgeTests(unittest.TestCase):
         )
 
         self.assertEqual(prompt, "Voice transcript:\nplease use the rest attachment")
+        self.assertEqual(warning, "")
+
+    def test_build_prompt_for_bridge_fetches_rest_payload_for_gateway_audio(self):
+        import asyncio
+
+        config = DiscordBridgeConfig(
+            token="token",
+            codex_channel_id=123,
+            drew_user_id=None,
+            workspace=Path(r"C:\workspace"),
+            turn_timeout_seconds=180,
+            log_path=Path("raw.log"),
+            output_dir=Path("outputs"),
+            state_path=Path("state.json"),
+            turn_log_path=Path("turns.log"),
+            session_mode="exec",
+        )
+        message = Mock()
+        message.id = 456
+        message.content = ""
+        message.flags = 8192
+        message.attachments = [Mock(filename="voice-message.ogg", content_type="audio/ogg")]
+        payload = {
+            "content": "",
+            "attachments": [{"filename": "voice-message.ogg", "content_type": "audio/ogg", "url": "url"}],
+        }
+
+        async def run():
+            import codex_discord_bridge
+            from unittest.mock import patch
+
+            with (
+                patch.object(codex_discord_bridge, "fetch_message_payload", return_value=payload),
+                patch.object(codex_discord_bridge.discord_voice, "transcribe_attachment_dict", return_value="rest transcript works"),
+            ):
+                return await build_prompt_for_bridge(config, message)
+
+        prompt, warning = asyncio.run(run())
+
+        self.assertEqual(prompt, "Voice transcript:\nrest transcript works")
         self.assertEqual(warning, "")
 
     def test_build_codex_session_defaults_to_exec_session(self):

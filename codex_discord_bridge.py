@@ -198,11 +198,9 @@ async def build_prompt_for_bridge(config: DiscordBridgeConfig, message: object) 
         len(attachments),
         bool(audio_attachment),
     )
-    if audio_attachment is not None:
-        return await build_prompt_from_message_async(message)
-
-    if content.lower() == "voice transcript:" or int(getattr(message, "flags", 0) or 0) & 8192:
-        log.info("message_fetch_fallback id=%s reason=voice_without_gateway_audio", message_id)
+    if audio_attachment is not None or content.lower() == "voice transcript:" or int(getattr(message, "flags", 0) or 0) & 8192:
+        reason = "gateway_audio" if audio_attachment is not None else "voice_without_gateway_audio"
+        log.info("message_fetch_fallback id=%s reason=%s", message_id, reason)
         payload = await asyncio.to_thread(fetch_message_payload, config, message_id)
         prompt, warning = await asyncio.to_thread(
             build_prompt_from_message_payload,
@@ -356,7 +354,12 @@ def main() -> None:
         elif action == "status":
             await bridge.status(message)
         else:
-            prompt, warning = await build_prompt_for_bridge(config, message)
+            try:
+                prompt, warning = await build_prompt_for_bridge(config, message)
+            except Exception as exc:
+                log.exception("Codex voice/text prompt preparation failed")
+                await message.reply(f"Codex bridge could not prepare that message: {exc}")
+                return
             if warning:
                 await message.reply(warning)
             if prompt:
