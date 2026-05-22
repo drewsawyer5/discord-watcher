@@ -53,6 +53,21 @@ try {
     Write-Log "process_ingest check error - $($_.Exception.Message)"
 }
 
+# --- Check tower_uptime_monitor.py ---
+try {
+    $procs = Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like "*tower_uptime_monitor.py*" }
+    if ($procs) {
+        $procId = ($procs | Select-Object -First 1).ProcessId
+        Write-Log "tower_uptime_monitor.py OK - pid $procId"
+    } else {
+        Write-Log "tower_uptime_monitor.py NOT running - restarting"
+        Start-Process "cmd.exe" -ArgumentList "/c `"$watcherDir\launch_uptime_monitor.bat`"" -WorkingDirectory $watcherDir -WindowStyle Hidden
+        Write-Log "tower_uptime_monitor.py start issued"
+    }
+} catch {
+    Write-Log "tower_uptime_monitor check error - $($_.Exception.Message)"
+}
+
 # --- Check Claude --channels session ---
 try {
     $procs = Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like "*--channels*" }

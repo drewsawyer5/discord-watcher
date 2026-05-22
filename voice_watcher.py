@@ -11,7 +11,12 @@ import requests
 from dotenv import load_dotenv
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
-from faster_whisper import WhisperModel
+
+import discord_voice
+try:
+    from discord_client import post_discord_message
+except Exception:  # pragma: no cover - Discord notify is best-effort
+    post_discord_message = None  # type: ignore[assignment]
 
 load_dotenv(Path(__file__).parent.parent / ".env")
 
@@ -31,12 +36,20 @@ WHISPER_MODEL = os.getenv("WHISPER_MODEL", "base")
 WHISPER_ENDPOINT = os.getenv("WHISPER_ENDPOINT", "").strip().rstrip("/")
 WHISPER_TIMEOUT = int(os.getenv("WHISPER_TIMEOUT", "600"))
 WHISPER_DIARIZE = os.getenv("WHISPER_DIARIZE", "").strip().lower() in {"1", "true", "yes"}
+WHISPER_LOCAL_PREWARM = os.getenv("WHISPER_LOCAL_PREWARM", "1").strip().lower() in {"1", "true", "yes"}
 STATUS_FILE = Path(__file__).parent / "status.json"
 WATCHER_LOG = Path(__file__).parent / "voice_watcher.log"
 SOAK_LOG = Path(__file__).parent / "whisperx_soak.jsonl"
 HEARTBEAT_INTERVAL = 300  # seconds (5 minutes)
 INBOX_MAX_AGE_HOURS = int(os.getenv("INBOX_MAX_AGE_HOURS", "72"))
 CLEANUP_INTERVAL = 3600  # seconds (1 hour)
+
+# Discord notification config — single channel for fallback alerts
+FALLBACK_NOTIFY_CHANNEL = os.getenv("FALLBACK_NOTIFY_CHANNEL", "1474888067893559360").strip()
+FALLBACK_NOTIFY_COOLDOWN = int(os.getenv("FALLBACK_NOTIFY_COOLDOWN", "300"))  # seconds
+_last_fallback_notify_ts = 0.0
+_last_via = "tower"  # tracks transition for recovery notifications
+_notify_lock = threading.Lock()
 
 log_format = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
 root_log = logging.getLogger()
@@ -50,30 +63,25 @@ root_log.addHandler(stream_handler)
 root_log.addHandler(file_handler)
 log = logging.getLogger(__name__)
 
-if WHISPER_ENDPOINT:
-    model = None
-else:
-    model = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
-
-# Seed the decoder with expected names and topic vocabulary so Whisper biases
-# toward recognizing them correctly. Keep under ~50 words; only affects first segment.
-_INITIAL_PROMPT = (
-    "Casual conversation between Drew and Sydney. "
-    "Topics: Obsidian, Discord, Claude, Resy, Tasker, AutoInput, Boston, Somerville, "
-    "Eevee, TCG Pocket, browser-harness, reservations, wine bar."
-)
-
 files_transcribed = 0
+files_via_local = 0
+files_failed = 0
 
 
 def write_heartbeat():
+    tower_state = discord_voice.get_tower_state()
     STATUS_FILE.write_text(
         json.dumps({
             "last_seen": datetime.now().isoformat(timespec="seconds"),
             "files_transcribed": files_transcribed,
+            "files_via_local": files_via_local,
+            "files_failed": files_failed,
             "watching": str(INBOX_DIR),
             "model": WHISPER_ENDPOINT if WHISPER_ENDPOINT else WHISPER_MODEL,
-            "mode": "remote" if WHISPER_ENDPOINT else "local",
+            "mode": "fallback" if WHISPER_ENDPOINT else "local",
+            "current_via": _last_via,
+            "tower_healthy": tower_state.get("healthy"),
+            "tower_last_error": tower_state.get("last_error"),
             **({"timeout": WHISPER_TIMEOUT, "diarize": WHISPER_DIARIZE} if WHISPER_ENDPOINT else {}),
         }, indent=2),
         encoding="utf-8",
@@ -114,101 +122,71 @@ def _write_soak_row(row: dict):
         f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
-def _remote_outcome(exc: Exception | None, status_code: int | None) -> str:
-    if exc is not None:
-        if isinstance(exc, requests.Timeout):
-            return "TIMEOUT"
-        if isinstance(exc, requests.ConnectionError):
-            return "CONNECTION_ERROR"
-        if isinstance(exc, (json.JSONDecodeError, KeyError, TypeError, ValueError)):
-            return "MALFORMED_RESPONSE"
-        if isinstance(exc, requests.HTTPError) and status_code is not None:
-            if 500 <= status_code <= 599:
-                return "HTTP_ERROR_5XX"
-            if 400 <= status_code <= 499:
-                return "HTTP_ERROR_4XX"
-        return "UNKNOWN_ERROR"
-    if status_code is not None:
-        if 500 <= status_code <= 599:
-            return "HTTP_ERROR_5XX"
-        if 400 <= status_code <= 499:
-            return "HTTP_ERROR_4XX"
-    return "UNKNOWN_ERROR"
+def _notify_fallback(via: str, filename: str, error: str | None) -> None:
+    """Post a Discord notice when transcription falls back to local or fails.
+
+    Cooldown'd so a long Tower outage doesn't spam the channel.
+    """
+    global _last_fallback_notify_ts, _last_via
+    if post_discord_message is None or not FALLBACK_NOTIFY_CHANNEL:
+        return
+
+    with _notify_lock:
+        previous = _last_via
+        _last_via = via
+        now_ts = time.monotonic()
+        should_notify = False
+        message = None
+
+        if via == "tower" and previous in {"local", "failed"}:
+            message = f"✅ Tower WhisperX back online — switched back to remote (file: `{filename}`)."
+            should_notify = True
+        elif via == "local" and previous != "local":
+            message = (
+                f"⚠️ Tower WhisperX unreachable — using local faster-whisper for `{filename}`. "
+                f"Reason: {error or 'unknown'}"
+            )
+            should_notify = True
+        elif via == "local" and now_ts - _last_fallback_notify_ts > FALLBACK_NOTIFY_COOLDOWN:
+            message = f"⚠️ Still on local faster-whisper. Latest: `{filename}`."
+            should_notify = True
+        elif via == "failed":
+            message = (
+                f"🔴 Voice transcription FAILED for `{filename}` — both Tower and local "
+                f"refused. Manual review needed.\n```\n{(error or '')[:400]}\n```"
+            )
+            should_notify = True
+
+        if should_notify and message:
+            _last_fallback_notify_ts = now_ts
+
+    if should_notify and message:
+        try:
+            post_discord_message(message, FALLBACK_NOTIFY_CHANNEL)
+        except Exception as exc:
+            log.warning(f"Failed to post fallback notification to Discord: {exc}")
 
 
-def _transcribe_remote(ogg_path: Path) -> str:
-    start = time.monotonic()
-    status_code = None
-    log.info(f"Remote POST start file={ogg_path.name} endpoint={WHISPER_ENDPOINT} timeout={WHISPER_TIMEOUT} diarize={WHISPER_DIARIZE}")
+def _record_soak(ogg_path: Path, result: dict) -> None:
+    """Append one row per transcription attempt to the soak log."""
+    try:
+        file_size = ogg_path.stat().st_size
+    except OSError:
+        file_size = None
+
     row = {
         "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "filename": ogg_path.name,
-        "file_size": ogg_path.stat().st_size,
+        "file_size": file_size,
+        "via": result.get("via"),
+        "latency_sec": round((result.get("latency_ms") or 0) / 1000.0, 3),
+        "char_count": len(result.get("text") or ""),
+        "used_endpoint": result.get("used_endpoint"),
+        "error": (result.get("error") or "")[:500] or None,
     }
-    try:
-        post_data = {"diarize": "true"} if WHISPER_DIARIZE else None
-        with ogg_path.open("rb") as f:
-            resp = requests.post(
-                f"{WHISPER_ENDPOINT}/transcribe",
-                files={"file": (ogg_path.name, f, "audio/ogg")},
-                data=post_data,
-                timeout=WHISPER_TIMEOUT,
-            )
-        status_code = resp.status_code
-        resp.raise_for_status()
-        data = resp.json()
-        transcript = data.get("text")
-        if transcript is None:
-            segments = data.get("segments", [])
-            transcript = " ".join(seg.get("text", "").strip() for seg in segments).strip()
-        if not isinstance(transcript, str):
-            raise ValueError("response text is not a string")
-        latency = time.monotonic() - start
-        row.update({
-            "latency_sec": round(latency, 3),
-            "http_status": status_code,
-            "outcome": "SUCCESS",
-            "char_count": len(transcript),
-        })
-        _write_soak_row(row)
-        log.info(f"Remote POST success file={ogg_path.name} status={status_code} latency_sec={latency:.3f} chars={len(transcript)}")
-        return transcript
-    except Exception as exc:
-        latency = time.monotonic() - start
-        error_text = str(exc)
-        response_text = getattr(locals().get("resp", None), "text", "")
-        if response_text:
-            error_text = response_text
-        row.update({
-            "latency_sec": round(latency, 3),
-            "http_status": status_code,
-            "outcome": _remote_outcome(exc, status_code),
-            "error": error_text[:500],
-        })
-        _write_soak_row(row)
-        log.error(f"Remote POST failed file={ogg_path.name} outcome={row['outcome']} status={status_code} latency_sec={latency:.3f} error={row['error']}")
-        raise
-
-
-def _transcribe_local(ogg_path: Path) -> str:
-    segments, _ = model.transcribe(
-        str(ogg_path),
-        language="en",
-        condition_on_previous_text=False,
-        initial_prompt=_INITIAL_PROMPT,
-        vad_filter=True,
-        no_speech_threshold=0.4,
-        compression_ratio_threshold=2.1,
-        log_prob_threshold=-0.8,
-        beam_size=5,
-    )
-    return " ".join(s.text.strip() for s in segments).strip()
-
-
-def transcribe(ogg_path: Path) -> str:
-    if WHISPER_ENDPOINT:
-        return _transcribe_remote(ogg_path)
-    return _transcribe_local(ogg_path)
+    SOAK_LOG.parent.mkdir(parents=True, exist_ok=True)
+    with SOAK_LOG.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
 def get_log_path() -> Path:
@@ -218,17 +196,18 @@ def get_log_path() -> Path:
     return log_path
 
 
-def append_to_log(transcript: str, source_file: str):
+def append_to_log(transcript: str, source_file: str, via: str = "tower"):
     log_path = get_log_path()
     timestamp = datetime.now().strftime("%H:%M")
-    entry = f"🎤 [{timestamp}] {transcript} *(voice: {source_file})*\n"
+    suffix = " ⚠️ via local" if via == "local" else ""
+    entry = f"🎤 [{timestamp}] {transcript} *(voice: {source_file}{suffix})*\n"
     with log_path.open("a", encoding="utf-8") as f:
         f.write(entry)
     log.info(f"Logged to {log_path}")
 
 
 def process_ogg(ogg_path: Path):
-    global files_transcribed
+    global files_transcribed, files_via_local, files_failed
     key = os.path.normcase(str(ogg_path.resolve()))
     with _processing_lock:
         if key in _in_progress:
@@ -241,48 +220,84 @@ def process_ogg(ogg_path: Path):
         _in_progress.add(key)
     log.info(f"Transcribing: {ogg_path.name}")
     try:
-        transcript = transcribe(ogg_path)
+        result = discord_voice.transcribe_with_fallback(ogg_path)
+        via = result.get("via", "failed")
+        latency_ms = result.get("latency_ms", 0)
+        _record_soak(ogg_path, result)
+
+        if via == "failed":
+            files_failed += 1
+            log.error(
+                f"Transcription FAILED file={ogg_path.name} latency_ms={latency_ms} "
+                f"error={result.get('error')}"
+            )
+            _notify_fallback("failed", ogg_path.name, result.get("error"))
+            return
+
+        transcript = (result.get("text") or "").strip()
         txt_path.write_text(transcript, encoding="utf-8")
         files_transcribed += 1
-        log.info(f"Wrote: {txt_path.name}")
-        append_to_log(transcript, ogg_path.name)
-        write_heartbeat()  # update immediately after each transcription
-    except Exception as e:
-        log.error(f"Failed to transcribe {ogg_path.name}: {e}")
-        raise
+        if via == "local":
+            files_via_local += 1
+        log.info(
+            f"Transcribed file={ogg_path.name} via={via} latency_ms={latency_ms} "
+            f"chars={len(transcript)}"
+        )
+        append_to_log(transcript, ogg_path.name, via=via)
+        _notify_fallback(via, ogg_path.name, result.get("error"))
+        write_heartbeat()
     finally:
         with _processing_lock:
             _in_progress.discard(key)
 
 
+def _handle_event_safely(path: Path) -> None:
+    """Process a file event without ever letting an exception escape into watchdog.
+
+    Watchdog's Observer thread can stop dispatching events if a handler raises.
+    All exceptions get logged and swallowed here so the Observer keeps running.
+    """
+    try:
+        time.sleep(1)  # ensure file is fully written before reading
+        process_ogg(path)
+    except Exception as exc:  # pragma: no cover - defensive guard
+        log.exception(f"process_ogg crashed for {path.name}: {exc}")
+
+
 class OggHandler(FileSystemEventHandler):
     def on_created(self, event):
         if not event.is_directory and event.src_path.endswith(".ogg"):
-            time.sleep(1)  # ensure file is fully written before reading
-            process_ogg(Path(event.src_path))
+            _handle_event_safely(Path(event.src_path))
 
     def on_moved(self, event):
         if not event.is_directory and event.dest_path.endswith(".ogg"):
-            time.sleep(1)
-            process_ogg(Path(event.dest_path))
+            _handle_event_safely(Path(event.dest_path))
 
 
 def main():
     log.info(f"Watching {INBOX_DIR} for .ogg files")
     if WHISPER_ENDPOINT:
-        log.info(f"Transcription mode: remote endpoint={WHISPER_ENDPOINT} timeout={WHISPER_TIMEOUT} diarize={WHISPER_DIARIZE}")
+        log.info(
+            f"Transcription mode: fallback (Tower first, local backup). "
+            f"endpoint={WHISPER_ENDPOINT} timeout={WHISPER_TIMEOUT} diarize={WHISPER_DIARIZE}"
+        )
     else:
-        log.info(f"Transcription mode: local model={WHISPER_MODEL}")
+        log.info(f"Transcription mode: local-only model={WHISPER_MODEL}")
 
-    # Write initial heartbeat and start background threads
+    if WHISPER_LOCAL_PREWARM:
+        try:
+            log.info(f"Pre-warming local faster-whisper model: {WHISPER_MODEL}")
+            discord_voice.warm_local_model(WHISPER_MODEL)
+        except Exception as exc:
+            log.warning(f"Local model pre-warm failed (will retry on demand): {exc}")
+
     write_heartbeat()
     threading.Thread(target=heartbeat_loop, daemon=True).start()
     threading.Thread(target=cleanup_loop, daemon=True).start()
 
-    # Clean up old files on startup, then catch up on any existing untranscribed files
     cleanup_old_inbox_files()
     for ogg in sorted(INBOX_DIR.glob("*.ogg")):
-        process_ogg(ogg)
+        _handle_event_safely(ogg)
 
     observer = Observer()
     observer.schedule(OggHandler(), str(INBOX_DIR), recursive=False)
@@ -291,6 +306,9 @@ def main():
     try:
         while True:
             time.sleep(5)
+            if not observer.is_alive():
+                log.error("Observer thread is no longer alive — exiting so supervisor restarts us")
+                break
     except KeyboardInterrupt:
         observer.stop()
     observer.join()

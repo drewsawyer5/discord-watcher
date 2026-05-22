@@ -14,4 +14,5 @@ venv/
 status.json
 twitter_cookies.json
 whisperx_soak.jsonl
+tower_uptime.json
 .synthetic_test_tmp/
