@@ -51,6 +51,7 @@ class DiscordBridgeConfig:
     session_mode: str
     voice_dir: Path
     voice_ready_delay_seconds: float
+    heartbeat_interval_seconds: float = 60.0
 
 
 def setup_logging() -> None:
@@ -81,6 +82,7 @@ def load_config() -> DiscordBridgeConfig:
         session_mode=os.getenv("CODEX_SESSION_MODE", "exec").strip().lower(),
         voice_dir=Path(os.getenv("CODEX_VOICE_DIR", str(DEFAULT_CODEX_VOICE_DIR))),
         voice_ready_delay_seconds=float(os.getenv("CODEX_VOICE_READY_DELAY_SECONDS", "1.0")),
+        heartbeat_interval_seconds=float(os.getenv("CODEX_HEARTBEAT_INTERVAL_SECONDS", "60")),
     )
 
 
@@ -115,6 +117,22 @@ def split_discord_message(content: str, limit: int = MAX_DISCORD_MESSAGE_LENGTH)
         chunks.append(chunk)
         remaining = remaining[len(chunk):].lstrip("\n")
     return chunks
+
+
+def build_heartbeat_message(state_path: Path, elapsed_seconds: float) -> str:
+    """Summarize current Codex activity using the persisted session JSONL."""
+    state = CodexBridgeState.load(state_path)
+    prefix = f"Codex working... {int(elapsed_seconds)}s elapsed."
+    if not state.session_file:
+        return f"{prefix} No session log is registered yet."
+
+    session_file = Path(state.session_file)
+    if not session_file.exists():
+        return f"{prefix} Session log not found: {session_file}"
+
+    stat = session_file.stat()
+    updated_ago = max(0, int(time.time() - stat.st_mtime))
+    return f"{prefix} Session log updated {updated_ago}s ago ({stat.st_size} bytes)."
 
 
 def _optional_int(value: str) -> int | None:
@@ -347,7 +365,22 @@ class CodexDiscordBridge:
             message, prompt = await self.queue.get()
             try:
                 await message.reply("Codex working...")
-                answer = await asyncio.to_thread(self.session.ask, prompt)
+                start = time.monotonic()
+                ask_task = asyncio.create_task(asyncio.to_thread(self.session.ask, prompt))
+                if self.config.heartbeat_interval_seconds > 0:
+                    while not ask_task.done():
+                        done, _ = await asyncio.wait(
+                            {ask_task},
+                            timeout=self.config.heartbeat_interval_seconds,
+                        )
+                        if done:
+                            break
+                        heartbeat = build_heartbeat_message(
+                            self.config.state_path,
+                            time.monotonic() - start,
+                        )
+                        await message.channel.send(heartbeat)
+                answer = await ask_task
                 if not answer:
                     answer = "(Codex returned no extractable text; raw log was saved.)"
                 for chunk in split_discord_message(answer):

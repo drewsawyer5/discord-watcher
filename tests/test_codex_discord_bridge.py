@@ -1,3 +1,4 @@
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock
@@ -336,6 +337,65 @@ class CodexDiscordBridgeTests(unittest.TestCase):
 
         message.channel.send.assert_called_once()
         self.assertIn("019e3735-0000-7000-8000-abcdefabcdef", message.channel.send.call_args.args[0])
+
+    def test_worker_sends_heartbeat_while_codex_turn_is_running(self):
+        import asyncio
+        import tempfile
+        from codex_discord_bridge import CodexDiscordBridge
+
+        async def run():
+            with tempfile.TemporaryDirectory() as tmp:
+                session_file = Path(tmp) / "session.jsonl"
+                session_file.write_text("started\n", encoding="utf-8")
+                state_path = Path(tmp) / "state.json"
+                state_path.write_text(
+                    '{"session_file": "' + str(session_file).replace("\\", "\\\\") + '"}',
+                    encoding="utf-8",
+                )
+                config = DiscordBridgeConfig(
+                    token="token",
+                    codex_channel_id=123,
+                    drew_user_id=None,
+                    workspace=Path(r"C:\workspace"),
+                    turn_timeout_seconds=180,
+                    log_path=Path("raw.log"),
+                    output_dir=Path("outputs"),
+                    state_path=state_path,
+                    turn_log_path=Path("turns.log"),
+                    session_mode="exec",
+                    voice_dir=Path("voice"),
+                    voice_ready_delay_seconds=0,
+                    heartbeat_interval_seconds=0.01,
+                )
+                session = Mock()
+
+                def ask(prompt):
+                    time.sleep(0.04)
+                    session_file.write_text("started\nstill working\n", encoding="utf-8")
+                    time.sleep(0.04)
+                    return "done"
+
+                session.ask.side_effect = ask
+                bridge = CodexDiscordBridge(config, session)
+                message = Mock()
+                message.reply = AsyncMock()
+                message.channel.send = AsyncMock()
+
+                worker = asyncio.create_task(bridge.worker())
+                await bridge.enqueue_prompt(message, "prompt")
+                await asyncio.wait_for(bridge.queue.join(), timeout=1)
+                worker.cancel()
+                try:
+                    await worker
+                except asyncio.CancelledError:
+                    pass
+
+                return [call.args[0] for call in message.channel.send.call_args_list]
+
+        sent = asyncio.run(run())
+
+        self.assertTrue(any("Codex working..." in item and "Session log" in item for item in sent))
+        self.assertEqual(sent[-1], "done")
 
 
 if __name__ == "__main__":
