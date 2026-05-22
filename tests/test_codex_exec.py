@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 import json
+import subprocess
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -170,6 +171,73 @@ class CodexExecRunnerTests(unittest.TestCase):
 
             with self.assertRaisesRegex(RuntimeError, "bad auth"):
                 runner.ask("hello")
+
+    def test_ask_returns_output_file_when_codex_times_out_after_writing_answer(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir) / "workspace"
+            output_dir = Path(temp_dir) / "outputs"
+            state_path = Path(temp_dir) / "codex_bridge_state.json"
+            turn_log_path = Path(temp_dir) / "codex_exec_turns.log"
+            workspace.mkdir()
+            state_path.write_text(
+                json.dumps({"session_id": "019e3733-ccd7-7791-babc-b67a9c4468e6"}),
+                encoding="utf-8",
+            )
+
+            def timeout_after_output(args, **kwargs):
+                Path(args[args.index("-o") + 1]).write_text("answer was already captured", encoding="utf-8")
+                raise subprocess.TimeoutExpired(args, timeout=kwargs["timeout"])
+
+            runner = CodexExecRunner(
+                CodexExecConfig(
+                    workspace=workspace,
+                    output_dir=output_dir,
+                    state_path=state_path,
+                    turn_log_path=turn_log_path,
+                    timeout_seconds=5,
+                ),
+                run_command=timeout_after_output,
+            )
+
+            answer = runner.ask("slow prompt")
+
+            self.assertEqual(answer, "answer was already captured")
+            saved = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertEqual(saved["last_answer_length"], len("answer was already captured"))
+            self.assertEqual(saved["last_error"], "")
+            event = json.loads(turn_log_path.read_text(encoding="utf-8").strip())
+            self.assertEqual(event["event"], "turn_timeout_recovered")
+            self.assertEqual(event["answer_length"], len("answer was already captured"))
+
+    def test_ask_raises_when_codex_times_out_without_output_file(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir) / "workspace"
+            output_dir = Path(temp_dir) / "outputs"
+            state_path = Path(temp_dir) / "codex_bridge_state.json"
+            turn_log_path = Path(temp_dir) / "codex_exec_turns.log"
+            workspace.mkdir()
+
+            def timeout_without_output(args, **kwargs):
+                raise subprocess.TimeoutExpired(args, timeout=kwargs["timeout"])
+
+            runner = CodexExecRunner(
+                CodexExecConfig(
+                    workspace=workspace,
+                    output_dir=output_dir,
+                    state_path=state_path,
+                    turn_log_path=turn_log_path,
+                    timeout_seconds=5,
+                ),
+                run_command=timeout_without_output,
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "timed out after 5 seconds"):
+                runner.ask("slow prompt")
+
+            saved = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertIn("timed out after 5 seconds", saved["last_error"])
+            event = json.loads(turn_log_path.read_text(encoding="utf-8").strip())
+            self.assertEqual(event["event"], "turn_error")
 
     def test_ask_saves_new_session_id_from_stdout_when_state_is_empty(self):
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -97,16 +97,44 @@ class CodexExecRunner:
         output_path = self.config.output_dir / f"codex-last-message-{int(time.time() * 1000)}.txt"
         args = self._build_args(prompt, output_path, session_id=state.session_id if resume else None)
         start = time.monotonic()
-        result = self._run_command(
-            args,
-            cwd=str(self.config.workspace),
-            capture_output=True,
-            encoding="utf-8",
-            errors="replace",
-            input=prompt,
-            text=True,
-            timeout=self.config.timeout_seconds,
-        )
+        try:
+            result = self._run_command(
+                args,
+                cwd=str(self.config.workspace),
+                capture_output=True,
+                encoding="utf-8",
+                errors="replace",
+                input=prompt,
+                text=True,
+                timeout=self.config.timeout_seconds,
+            )
+        except subprocess.TimeoutExpired as exc:
+            elapsed = time.monotonic() - start
+            if output_path.exists():
+                answer = output_path.read_text(encoding="utf-8").strip()
+                if answer:
+                    self._record_success(
+                        state=state,
+                        output_path=output_path,
+                        prompt=prompt,
+                        answer=answer,
+                        elapsed=elapsed,
+                        event=f"{event_prefix}_timeout_recovered",
+                    )
+                    return answer
+            detail = f"codex exec timed out after {self.config.timeout_seconds} seconds"
+            state.last_error = detail
+            state.save(self.config.state_path)
+            self._write_turn_log(
+                {
+                    "event": f"{event_prefix}_error",
+                    "session_id": state.session_id,
+                    "prompt_length": len(prompt),
+                    "elapsed_seconds": round(elapsed, 3),
+                    "error": detail,
+                }
+            )
+            raise RuntimeError(detail) from exc
         elapsed = time.monotonic() - start
         if result.returncode != 0:
             detail = (result.stderr or "").strip() or f"codex exec exited with {result.returncode}"
@@ -130,6 +158,25 @@ class CodexExecRunner:
             answer = output_path.read_text(encoding="utf-8").strip()
         else:
             answer = stdout.strip()
+        self._record_success(
+            state=state,
+            output_path=output_path,
+            prompt=prompt,
+            answer=answer,
+            elapsed=elapsed,
+            event=f"{event_prefix}_success",
+        )
+        return answer
+
+    def _record_success(
+        self,
+        state: CodexBridgeState,
+        output_path: Path,
+        prompt: str,
+        answer: str,
+        elapsed: float,
+        event: str,
+    ) -> None:
         now = datetime.now().astimezone().isoformat(timespec="seconds")
         state.last_output_file = str(output_path)
         state.last_success_at = now
@@ -139,7 +186,7 @@ class CodexExecRunner:
         state.save(self.config.state_path)
         self._write_turn_log(
             {
-                "event": f"{event_prefix}_success",
+                "event": event,
                 "session_id": state.session_id,
                 "prompt_length": len(prompt),
                 "answer_length": len(answer),
@@ -147,7 +194,6 @@ class CodexExecRunner:
                 "output_file": str(output_path),
             }
         )
-        return answer
 
     def _build_args(self, prompt: str, output_path: Path, session_id: str | None = None) -> Sequence[str]:
         codex_bin = shutil.which(self.config.codex_bin) or self.config.codex_bin
