@@ -9,6 +9,7 @@ Usage:
     python session_start.py --dry-run    (print message, don't post)
 """
 
+import os
 import sys
 import re
 from pathlib import Path
@@ -29,7 +30,8 @@ def parse_section(text: str, header: str) -> list[str]:
     """Return bullet lines under `header:` until the next section header or ## heading."""
     lines, capturing = [], False
     for line in text.splitlines():
-        if re.match(rf"^{re.escape(header)}:", line, re.IGNORECASE):
+        # Match "Worked on:" and the actual format "Worked on (2026-06-08 session):".
+        if re.match(rf"^{re.escape(header)}\b.*:\s*$", line, re.IGNORECASE):
             capturing = True
             continue
         if capturing:
@@ -61,7 +63,8 @@ def build_message(worked_on: list[str], planned_next: str) -> str:
     parts = ["🟢 **Session started.**"]
 
     if worked_on:
-        recent = worked_on[-LAST_N_ITEMS:]
+        # Entries are logged newest-first, so the most recent are at the top.
+        recent = worked_on[:LAST_N_ITEMS]
         items = "\n".join(f"• {item}" for item in recent)
         parts.append(f"\n**Last worked on:**\n{items}")
     else:
@@ -76,6 +79,13 @@ def build_message(worked_on: list[str], planned_next: str) -> str:
 
 def main():
     dry_run = "--dry-run" in sys.argv
+
+    # Automated one-shot runs (digest / overnight-core / overnight-kickoff,
+    # tagged PA_AUTOMATED=1 in their Task Scheduler commands) are not real
+    # interactive sessions — skip the "session started" post for them. The
+    # always-on watcher's real (re)starts are untagged and still post.
+    if os.getenv("PA_AUTOMATED") and not dry_run:
+        sys.exit(0)
 
     if not SESSION_CONTEXT.exists():
         print(f"ERROR: session-context.md not found at {SESSION_CONTEXT}", file=sys.stderr)
