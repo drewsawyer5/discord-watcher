@@ -35,7 +35,19 @@ SSH_TIMEOUT = 10
 MAX_RESTARTS_PER_WINDOW = 3          # backoff: stop fighting a crashloop
 WINDOW_SECONDS = 3600
 LOG_TAIL = 20
-BASH = shutil.which("bash") or r"C:\Program Files\Git\usr\bin\bash.EXE"
+def _find_bash():
+    # PATH-independent: scheduled tasks (S4U) have a different PATH where
+    # which("bash") can resolve to a broken npm shim. Prefer known Git Bash.
+    for p in (r"C:\Program Files\Git\usr\bin\bash.exe",
+              r"C:\Program Files\Git\bin\bash.exe",
+              r"C:\Program Files (x86)\Git\usr\bin\bash.exe",
+              os.environ.get("NUC_WATCHDOG_BASH", "")):
+        if p and os.path.exists(p):
+            return p
+    return shutil.which("bash") or "bash"
+
+
+BASH = _find_bash()
 
 
 def now_iso():
