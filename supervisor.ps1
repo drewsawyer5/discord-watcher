@@ -38,20 +38,12 @@ try {
     Write-Log "voice_watcher check error - $($_.Exception.Message)"
 }
 
-# --- Check process_ingest.py ---
-try {
-    $procs = Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like "*process_ingest.py*" }
-    if ($procs) {
-        $procId = ($procs | Select-Object -First 1).ProcessId
-        Write-Log "process_ingest.py OK - pid $procId"
-    } else {
-        Write-Log "process_ingest.py NOT running - restarting"
-        Start-Process "cmd.exe" -ArgumentList "/c `"$watcherDir\launch_ingest.bat`"" -WorkingDirectory $watcherDir -WindowStyle Hidden
-        Write-Log "process_ingest.py start issued"
-    }
-} catch {
-    Write-Log "process_ingest check error - $($_.Exception.Message)"
-}
+# --- process_ingest.py: MOVED TO NUC (2026-06-22, Step 2 dedup) ---
+# Ingest now runs SOLELY on the NUC (discord-watcher.service). A6 must NOT
+# poll the ingest channel too — both polling 1474888214639546631 caused every
+# #inbox message to be double-processed into the shared (Syncthing) vault.
+# Do NOT re-enable here. See [[Monitoring & Logs (NUC Consolidation)]] Step 2.
+Write-Log "process_ingest.py SKIPPED on A6 - owned by NUC (dedup 2026-06-22)"
 
 # --- Check tower_uptime_monitor.py ---
 try {
