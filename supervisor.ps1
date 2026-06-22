@@ -68,8 +68,8 @@ try {
         Write-Log "claude OK - pid $procId"
     } else {
         Write-Log "claude NOT running - restarting"
-        Start-Process "cmd.exe" -ArgumentList "/c `"$watcherDir\launch_claude.bat`"" -WorkingDirectory $watcherDir -WindowStyle Hidden
-        Write-Log "claude start issued"
+        Start-Process "cmd.exe" -ArgumentList "/c `"$watcherDir\launch_claude.bat`"" -WorkingDirectory $watcherDir -WindowStyle Normal
+        Write-Log "claude start issued (visible window)"
     }
 } catch {
     Write-Log "claude check error - $($_.Exception.Message)"
