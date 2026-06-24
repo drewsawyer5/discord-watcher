@@ -141,7 +141,17 @@ def call_llm(system: str, user: str) -> str:
         RuntimeError: If the provider call errored (caller re-queues for retry).
         ValueError: If no JSON object could be parsed from the output.
     """
-    result = llm_provider.call_llm(system, user, json_mode=True)
+    # Ingest-scoped provider/model/effort (independent of pa-bot's chat model).
+    # Set these in .env at deploy, e.g. INGEST_LLM_PROVIDER=codex,
+    # INGEST_LLM_MODEL=gpt-5.4-mini, INGEST_LLM_EFFORT=medium.
+    result = llm_provider.call_llm(
+        system,
+        user,
+        json_mode=True,
+        provider=os.getenv("INGEST_LLM_PROVIDER") or LLM_PROVIDER,
+        model=os.getenv("INGEST_LLM_MODEL"),
+        effort=os.getenv("INGEST_LLM_EFFORT"),
+    )
     if result.error:
         raise RuntimeError(f"LLM error ({result.provider}): {result.error}")
     obj = llm_provider.extract_json_object(result.text)
