@@ -67,9 +67,14 @@ try {
         $procId = ($procs | Select-Object -First 1).ProcessId
         Write-Log "claude OK - pid $procId"
     } else {
-        Write-Log "claude NOT running - restarting"
-        Start-Process "cmd.exe" -ArgumentList "/c `"$watcherDir\launch_claude.bat`"" -WorkingDirectory $watcherDir -WindowStyle Normal
-        Write-Log "claude start issued (visible window)"
+        Write-Log "claude NOT running - restarting via interactive task"
+        # Launch through the Interactive "Discord Watcher" task, NOT Start-Process.
+        # This supervisor runs under an S4U (non-interactive, session-0) principal,
+        # so any window it spawns directly would be invisible. schtasks /Run hands
+        # the launch to the Task Scheduler service, which runs "Discord Watcher" in
+        # its configured Interactive session -> visible window on the logged-in desktop.
+        schtasks /Run /TN "Discord Watcher" | Out-Null
+        Write-Log "claude start issued via interactive task 'Discord Watcher' (visible window; rc=$LASTEXITCODE)"
     }
 } catch {
     Write-Log "claude check error - $($_.Exception.Message)"

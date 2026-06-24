@@ -1,6 +1,16 @@
 """
-restart.py — kills Claude, triggers supervisor relaunch, posts start-session to Discord.
+restart.py — kills Claude, then triggers the interactive "Discord Watcher"
+scheduled task to relaunch it in a VISIBLE window on the logged-in desktop.
 Called by the /restart-session skill as a detached background process.
+
+Visibility note: the relaunch goes through `schtasks /Run`, which hands the
+launch to the Task Scheduler service. That service runs the task in its own
+configured (Interactive) session, so the Claude window appears on A6's desktop
+regardless of how hidden/non-interactive THIS process is. The same call works
+when triggered remotely from the NUC over SSH (ssh A6 schtasks /Run /TN ...).
+
+Requires an active interactive logon session on A6 — a window cannot render on
+a desktop that does not exist.
 
 Usage: python restart.py
 """
@@ -18,6 +28,10 @@ load_dotenv(_env_path)
 
 WATCHDOG_PATH    = Path(__file__).parent / "supervisor.ps1"
 LOG_PATH         = Path(__file__).parent / "restart.log"
+# Interactive scheduled task that launches Claude in a visible window.
+# Triggered via `schtasks /Run` so the window lands in the task's own
+# (Interactive) desktop session, not in this process's hidden station.
+LAUNCH_TASK      = "Discord Watcher"
 
 WAIT_BEFORE_KILL  = 12   # seconds for Claude to finish its Discord post before kill
 KILL_VERIFY_TIMEOUT = 15  # seconds to wait for a PID to disappear after taskkill
@@ -115,21 +129,33 @@ def main():
         alert(msg)
         sys.exit(1)
 
-    log(f"{PROCESS_NAME} confirmed dead (all PIDs gone) — proceeding to supervisor")
+    log(f"{PROCESS_NAME} confirmed dead (all PIDs gone) — triggering interactive launch task")
 
-    log(f"calling supervisor: {WATCHDOG_PATH}")
+    # Hand the relaunch to Task Scheduler. Because "Discord Watcher" is an
+    # Interactive task, the Task Scheduler service opens the Claude window in
+    # the logged-in desktop session — visible — no matter that this process is
+    # detached/non-interactive. (Watchers are untouched by the kill above and
+    # are kept alive independently by the 5-minute Discord PA Watchdog.)
+    log(f"schtasks /Run /TN \"{LAUNCH_TASK}\"")
     proc = subprocess.run(
-        ["powershell", "-NonInteractive", "-File", str(WATCHDOG_PATH)],
+        ["schtasks", "/Run", "/TN", LAUNCH_TASK],
         capture_output=True,
         text=True,
     )
-    log(f"supervisor exit code: {proc.returncode}")
+    log(f"schtasks /Run exit code: {proc.returncode}")
     if proc.stdout.strip():
-        log(f"supervisor stdout: {proc.stdout.strip()}")
+        log(f"schtasks stdout: {proc.stdout.strip()}")
     if proc.stderr.strip():
-        log(f"supervisor stderr: {proc.stderr.strip()}")
+        log(f"schtasks stderr: {proc.stderr.strip()}")
+    if proc.returncode != 0:
+        alert(
+            f"schtasks /Run '{LAUNCH_TASK}' failed (rc={proc.returncode}): "
+            f"{proc.stderr.strip() or proc.stdout.strip()} — Claude may not have relaunched. "
+            f"Is A6 logged in?"
+        )
+        sys.exit(1)
 
-    log("done — supervisor will launch Claude")
+    log("done — interactive task will launch Claude in a visible window")
 
 
 if __name__ == "__main__":
