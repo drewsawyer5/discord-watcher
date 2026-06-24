@@ -46,6 +46,7 @@ import ingest_review
 # into pa-bot and this becomes a normal import. See "pa-bot Ingest Unification".
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "pa-bot"))
 import llm_provider
+import daily_flow  # records each ingest into the shared ingest_events SQLite table
 
 # Load shared Drew_code/.env (one level up from this repo)
 _env_path = Path(__file__).parent.parent / ".env"
@@ -388,6 +389,8 @@ Return a single JSON object:
     }}
   ],
   "discord_reply": "**Ingested:** ...\\n**Type:** ...\\n**Filed:** ...\\n**Summary:** ...",
+  "summary": "1-2 sentence plain summary of the item, for quick recall later",
+  "tags": ["topic-one", "topic-two"],
   "review": {{
     "extraction_clean": true,
     "output_consistent": true,
@@ -409,6 +412,8 @@ Rules:
 - For video (YouTube): treat exactly like article/source — write a wiki page in 6 - Wiki Hub/Videos/, include _log.md append with type "video". The transcript and metadata are already extracted by the system before this call.
 - For unsupported (non-image attachment, unknown file type): set files=[] and discord_reply="Unsupported file type — drop via Claude session."
 - discord_reply must be 4 lines or fewer
+- summary: a 1-2 sentence plain-language summary of the item (used later for "what have I ingested about X" recall)
+- tags: 2-5 short lowercase topic tags as a JSON array
 - review: self-check your work before returning, honestly (do NOT silently paper over problems):
   - extraction_clean: look at the content you were given — does it look cleanly extracted? i.e. coherent, the actual article/post, readable end to end — NOT cut off mid-sentence, NOT mostly nav/cookie/boilerplate junk, NOT garbled. Set false if the source content itself looks badly extracted (the upstream fetch may be at fault). Set true if it reads cleanly.
   - output_consistent: does the title / type / summary you produced actually match that content? Set false if your output doesn't fit what you were given.
@@ -438,6 +443,43 @@ def get_existing_lists_context() -> str:
 _RAW_INGEST_PREFIX = "5 - Storage/05 - Raw Ingests/"
 
 
+_ingest_store: "daily_flow.DailyFlowStore | None" = None
+
+
+def _get_ingest_store() -> "daily_flow.DailyFlowStore":
+    """Lazily open the shared ingest_events store (pa-bot's daily_flow DB)."""
+    global _ingest_store
+    if _ingest_store is None:
+        default = Path(__file__).resolve().parents[1] / "pa-bot" / "state" / "daily_flow.db"
+        db_path = os.getenv("INGEST_EVENTS_DB", str(default))
+        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+        _ingest_store = daily_flow.DailyFlowStore(db_path)
+    return _ingest_store
+
+
+def _record_ingest_event(result: dict, source: str, wiki_path: str):
+    """Record a successful ingest in SQLite (best-effort; never fail the ingest).
+
+    This is what lets the PA later answer "what have I ingested" by querying the
+    DB — separate from, and never consuming, the rolling conversation turns.
+    """
+    try:
+        tags = result.get("tags")
+        if isinstance(tags, list):
+            tags = ", ".join(str(t) for t in tags)
+        _get_ingest_store().add_event(
+            topic=result.get("type", "item"),
+            title=result.get("title", "(untitled)"),
+            source=source or "",
+            content_type=result.get("type"),
+            summary=result.get("summary"),
+            wiki_path=wiki_path or None,
+            tags=tags,
+        )
+    except Exception as exc:  # noqa: BLE001 — recording is best-effort
+        log.warning(f"ingest_events write failed (non-fatal): {exc}")
+
+
 def _post_review_flag(message_id: str, title: str, review: dict, wiki_path: str, raw_rel: str):
     """Post an attributed quality-review heads-up to #inbox (entry was still written)."""
     side_label = {
@@ -465,6 +507,7 @@ def _apply_ingest_result(
     *,
     raw_rel: str = "",
     extraction_flags: list | None = None,
+    source: str = "",
 ):
     """Write files and post reply from a parsed LLM result. Shared by all paths.
 
@@ -515,6 +558,9 @@ def _apply_ingest_result(
     review = ingest_review.summarize_review(extraction_flags or [], result.get("review"))
     if review["flagged"]:
         _post_review_flag(message_id, result.get("title", label), review, wiki_path, raw_rel)
+
+    # Record the ingest in SQLite so the PA can recall it later (best-effort).
+    _record_ingest_event(result, source or label, wiki_path)
 
 
 LLM_URL_CAP = 25_000  # chars passed to LLM for URL content
