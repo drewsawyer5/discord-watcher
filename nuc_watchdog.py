@@ -6,7 +6,10 @@ death. Behaviour (per Drew, 2026-06-22):
   - service DOWN (NUC reachable): auto-restart with backoff (won't fight a
     crashloop) + email alert WITH the last ~20 journal lines.
   - NUC unreachable (powered-off / hung): email alert for MANUAL power-cycle
-    (no Wake-on-LAN yet — deferred option).
+    (no Wake-on-LAN yet — deferred option). DEBOUNCED so a transient
+    Tailscale/SSH blip can't false-alarm (root cause of the 2026-06-22 false
+    "NUC UNREACHABLE"): reachability is retried in-tick AND must fail across
+    NUC_UNREACHABLE_DEBOUNCE consecutive ticks before any alert fires.
   - State-tracked so it alerts on change, not every tick.
 
 Single-shot: schedule via Task Scheduler every ~5 min. No LLM in the loop.
@@ -35,6 +38,11 @@ SSH_TIMEOUT = 10
 MAX_RESTARTS_PER_WINDOW = 3          # backoff: stop fighting a crashloop
 WINDOW_SECONDS = 3600
 LOG_TAIL = 20
+# Debounce for the unreachable check (added 2026-06-24 after a 1-sec Tailscale
+# blip false-alarmed "NUC UNREACHABLE" while the NUC was fine, 57d uptime).
+REACH_RETRIES = int(os.environ.get("NUC_REACH_RETRIES", "3"))        # in-tick attempts
+REACH_RETRY_DELAY = int(os.environ.get("NUC_REACH_RETRY_DELAY", "3"))  # seconds between attempts
+UNREACHABLE_DEBOUNCE = int(os.environ.get("NUC_UNREACHABLE_DEBOUNCE", "2"))  # consecutive failing ticks before alert
 def _find_bash():
     # PATH-independent: scheduled tasks (S4U) have a different PATH where
     # which("bash") can resolve to a broken npm shim. Prefer known Git Bash.
@@ -101,8 +109,16 @@ def send_email(subject, body):
 
 
 def nuc_reachable():
-    rc, _, _ = ssh(["true"])
-    return rc == 0
+    """True if the NUC answers SSH. Retries in-tick to ride out a transient
+    Tailscale/SSH blip before the caller treats it as a real outage."""
+    for attempt in range(1, REACH_RETRIES + 1):
+        rc, _, _ = ssh(["true"])
+        if rc == 0:
+            return True
+        if attempt < REACH_RETRIES:
+            log(f"reachability attempt {attempt}/{REACH_RETRIES} failed — retrying in {REACH_RETRY_DELAY}s")
+            time.sleep(REACH_RETRY_DELAY)
+    return False
 
 
 def svc_active(svc):
@@ -144,17 +160,30 @@ def main():
 
     state = load_state()
 
-    # 1) reachability — powered-off / hung NUC -> manual alert (no WoL yet)
+    # 1) reachability — powered-off / hung NUC -> manual alert (no WoL yet).
+    #    Debounced: a single failing tick (transient blip) must NOT alert. We
+    #    require UNREACHABLE_DEBOUNCE consecutive failing ticks first.
     if not nuc_reachable():
+        misses = state.get("unreachable_misses", 0) + 1
+        state["unreachable_misses"] = misses
+        if misses < UNREACHABLE_DEBOUNCE:
+            save_state(state)
+            log(f"NUC unreachable — miss {misses}/{UNREACHABLE_DEBOUNCE} (debounce, no alert yet)")
+            return
         if state.get("nuc_reachable", True):          # alert once, on change
             send_email("[NUC Watchdog] NUC UNREACHABLE — manual power-cycle likely needed",
-                       f"The NUC ({NUC}) is not reachable over SSH as of {now_iso()}.\n"
+                       f"The NUC ({NUC}) failed SSH on {misses} consecutive checks "
+                       f"(debounce threshold {UNREACHABLE_DEBOUNCE}), as of {now_iso()}.\n"
                        "Auto-recovery is not attempted for power/hang events (by design).\n"
                        "Action: check power/console; power-cycle if hung.")
         state["nuc_reachable"] = False
         save_state(state)
-        log("NUC UNREACHABLE")
+        log(f"NUC UNREACHABLE (confirmed after {misses} consecutive misses)")
         return
+    # reachable — clear the debounce counter and announce recovery if needed
+    if state.get("unreachable_misses", 0):
+        log(f"NUC reachable again — clearing {state['unreachable_misses']} miss(es)")
+    state["unreachable_misses"] = 0
     if not state.get("nuc_reachable", True):
         send_email("[NUC Watchdog] NUC back online",
                    f"NUC ({NUC}) is reachable again as of {now_iso()}.")
