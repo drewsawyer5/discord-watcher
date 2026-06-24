@@ -34,7 +34,7 @@ class CheckExtractionTests(unittest.TestCase):
 
 
 class SummarizeReviewTests(unittest.TestCase):
-    _CLEAN_LLM = {"extraction_complete": True, "output_consistent": True, "issues": ""}
+    _CLEAN_LLM = {"extraction_clean": True, "output_consistent": True, "issues": ""}
 
     def test_no_problems_is_not_flagged(self):
         result = summarize_review([], self._CLEAN_LLM)
@@ -48,20 +48,20 @@ class SummarizeReviewTests(unittest.TestCase):
         self.assertEqual(result["side"], "extraction")
         self.assertIn("content very short (90 chars)", result["reasons"])
 
-    def test_llm_incomplete_body_attributes_to_extraction(self):
-        review = {"extraction_complete": False, "output_consistent": True, "issues": "ends mid-sentence"}
+    def test_llm_unclean_extraction_attributes_to_extraction(self):
+        review = {"extraction_clean": False, "output_consistent": True, "issues": "ends mid-sentence"}
         result = summarize_review([], review)
         self.assertEqual(result["side"], "extraction")
         self.assertTrue(any("ends mid-sentence" in r for r in result["reasons"]))
 
     def test_llm_output_inconsistent_attributes_to_llm(self):
-        review = {"extraction_complete": True, "output_consistent": False, "issues": "title says X, body is Y"}
+        review = {"extraction_clean": True, "output_consistent": False, "issues": "title says X, body is Y"}
         result = summarize_review([], review)
         self.assertEqual(result["side"], "llm")
         self.assertTrue(any("title says X" in r for r in result["reasons"]))
 
     def test_problems_on_both_sides_attribute_to_both(self):
-        review = {"extraction_complete": True, "output_consistent": False, "issues": "mismatch"}
+        review = {"extraction_clean": True, "output_consistent": False, "issues": "mismatch"}
         result = summarize_review(["regex fallback used"], review)
         self.assertEqual(result["side"], "both")
 

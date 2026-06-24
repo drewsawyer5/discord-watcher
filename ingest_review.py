@@ -73,10 +73,11 @@ def summarize_review(extraction_flags: list[str], llm_review: dict | None) -> di
 
     Detector sources:
         * ``extraction_flags`` — Python objective checks (extraction side).
-        * ``llm_review["extraction_complete"]`` — LLM judged whether the body
-          looks like a full article (extraction side).
+        * ``llm_review["extraction_clean"]`` — LLM judged whether the provided
+          content looks cleanly extracted (coherent, the actual article, not
+          garbled/cut-off/nav junk) (extraction side).
         * ``llm_review["output_consistent"]`` — LLM cross-checked its own
-          title/type/summary against the body (LLM-output side).
+          title/type/summary against the content (LLM-output side).
 
     Args:
         extraction_flags: Output of ``check_extraction``.
@@ -87,21 +88,21 @@ def summarize_review(extraction_flags: list[str], llm_review: dict | None) -> di
         ``{"flagged": bool, "side": "extraction"|"llm"|"both"|"", "reasons": [...]}``.
     """
     review = llm_review or {}
-    extraction_complete = review.get("extraction_complete", True)
+    extraction_clean = review.get("extraction_clean", True)
     output_consistent = review.get("output_consistent", True)
     issues = (review.get("issues") or "").strip()
     suffix = f": {issues}" if issues else ""
 
     reasons: list[str] = list(extraction_flags)
-    if extraction_complete is False:
-        reasons.append(f"LLM judged the extracted body incomplete/cut off{suffix}")
+    if extraction_clean is False:
+        reasons.append(f"LLM judged the extracted content not cleanly extracted{suffix}")
     if output_consistent is False:
-        reasons.append(f"LLM output may not match the body{suffix}")
+        reasons.append(f"LLM output may not match the content{suffix}")
 
     if not reasons:
         return {"flagged": False, "side": "", "reasons": []}
 
-    extraction_side = bool(extraction_flags) or extraction_complete is False
+    extraction_side = bool(extraction_flags) or extraction_clean is False
     llm_side = output_consistent is False
     if extraction_side and llm_side:
         side = "both"

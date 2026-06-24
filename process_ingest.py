@@ -38,6 +38,15 @@ from discord_client import (
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import discord_voice
 
+# Local: objective extraction checks + attributed review combiner.
+import ingest_review
+
+# Cross-repo (Phase A): the provider-flippable brain lives in pa-bot. Path-insert
+# is the same pattern used above for discord_voice; in Phase C ingest relocates
+# into pa-bot and this becomes a normal import. See "pa-bot Ingest Unification".
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "pa-bot"))
+import llm_provider
+
 # Load shared Drew_code/.env (one level up from this repo)
 _env_path = Path(__file__).parent.parent / ".env"
 load_dotenv(_env_path)
@@ -114,15 +123,31 @@ def get_llm_client() -> OpenAI:
 
 
 def call_llm(system: str, user: str) -> str:
-    resp = get_llm_client().chat.completions.create(
-        model=LLM_MODEL,
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user",   "content": user},
-        ],
-        response_format={"type": "json_object"},
-    )
-    return resp.choices[0].message.content
+    """Run the ingest prompt through the configured provider; return JSON text.
+
+    Delegates to llm_provider, whose provider is selected by the LLM_PROVIDER env
+    (codex | claude | ollama | openai_compat) so the ingest brain is flippable
+    without code changes. The JSON object is extracted from the (possibly
+    prose-wrapped, for CLI providers) response.
+
+    Args:
+        system: The ingest system prompt.
+        user: The content to classify/summarize.
+
+    Returns:
+        A JSON string (callers json.loads it).
+
+    Raises:
+        RuntimeError: If the provider call errored (caller re-queues for retry).
+        ValueError: If no JSON object could be parsed from the output.
+    """
+    result = llm_provider.call_llm(system, user, json_mode=True)
+    if result.error:
+        raise RuntimeError(f"LLM error ({result.provider}): {result.error}")
+    obj = llm_provider.extract_json_object(result.text)
+    if obj is None:
+        raise ValueError(f"No JSON object found in {result.provider} output")
+    return json.dumps(obj)
 
 
 def call_llm_with_image(system: str, user_text: str, image_b64: str, mime_type: str = "image/jpeg") -> str:
@@ -274,8 +299,15 @@ def check_digest_notify():
 # ---------------------------------------------------------------------------
 # URL content fetch
 # ---------------------------------------------------------------------------
-def fetch_url_content(url: str) -> str:
-    """Fetch URL and extract main text via trafilatura. Returns full text (no cap — callers cap for LLM)."""
+def fetch_url_content(url: str) -> tuple[str, bool]:
+    """Fetch URL and extract main text via trafilatura.
+
+    Returns:
+        (text, used_fallback). ``used_fallback`` is True when trafilatura
+        returned nothing and the crude regex strip was used instead — a
+        low-confidence extraction that detector ① flags for review. Text is
+        uncapped (callers cap for the LLM).
+    """
     try:
         import trafilatura
         downloaded = trafilatura.fetch_url(url)
@@ -283,17 +315,17 @@ def fetch_url_content(url: str) -> str:
             text = trafilatura.extract(downloaded, include_comments=False, include_tables=True)
             if text:
                 log.info(f"trafilatura extracted {len(text)} chars from {url}")
-                return text
+                return text, False
         # Fallback: regex strip if trafilatura returns nothing
         log.warning(f"trafilatura returned empty for {url} — falling back to regex strip")
         resp = requests.get(url, timeout=12, headers={"User-Agent": "Mozilla/5.0 (compatible; DrewPA/1.0)"})
         resp.raise_for_status()
         text = re.sub(r'<[^>]+>', ' ', resp.text)
         text = re.sub(r'\s+', ' ', text).strip()
-        return text
+        return text, True
     except Exception as e:
         log.warning(f"Fetch failed for {url}: {e}")
-        return f"[Fetch failed: {e}]"
+        return f"[Fetch failed: {e}]", False
 
 
 # ---------------------------------------------------------------------------
@@ -334,7 +366,12 @@ Return a single JSON object:
       "mode": "create | append"
     }}
   ],
-  "discord_reply": "**Ingested:** ...\\n**Type:** ...\\n**Filed:** ...\\n**Summary:** ..."
+  "discord_reply": "**Ingested:** ...\\n**Type:** ...\\n**Filed:** ...\\n**Summary:** ...",
+  "review": {{
+    "extraction_clean": true,
+    "output_consistent": true,
+    "issues": ""
+  }}
 }}
 
 Rules:
@@ -351,6 +388,11 @@ Rules:
 - For video (YouTube): treat exactly like article/source — write a wiki page in 6 - Wiki Hub/Videos/, include _log.md append with type "video". The transcript and metadata are already extracted by the system before this call.
 - For unsupported (non-image attachment, unknown file type): set files=[] and discord_reply="Unsupported file type — drop via Claude session."
 - discord_reply must be 4 lines or fewer
+- review: self-check your work before returning, honestly (do NOT silently paper over problems):
+  - extraction_clean: look at the content you were given — does it look cleanly extracted? i.e. coherent, the actual article/post, readable end to end — NOT cut off mid-sentence, NOT mostly nav/cookie/boilerplate junk, NOT garbled. Set false if the source content itself looks badly extracted (the upstream fetch may be at fault). Set true if it reads cleanly.
+  - output_consistent: does the title / type / summary you produced actually match that content? Set false if your output doesn't fit what you were given.
+  - issues: one short sentence naming the problem if either is false, else empty string.
+  - When unsure, prefer flagging (false) over hiding it — a human will review.
 - If the user message contains "Raw file: [[path]]", add "- **Raw:** [[path]]" to the ## Metadata section of all wiki pages being created (not to _log.md)
 - NEVER include paths under "5 - Storage/05 - Raw Ingests/" in the files[] array — those files are already written by the system before your call and must not be overwritten
 - NEVER write to vault folders 1–4 (1 - Homepage/, 2 - Projects/, 3 - Work/, 4 - Personal/). All output goes to 6 - Wiki Hub/ only. Routing to 1–4 is handled by /digest in a separate Claude session — not here.
@@ -375,14 +417,48 @@ def get_existing_lists_context() -> str:
 _RAW_INGEST_PREFIX = "5 - Storage/05 - Raw Ingests/"
 
 
-def _apply_ingest_result(result: dict, message_id: str, label: str):
-    """Write files and post reply from a parsed LLM result. Shared by URL and voice paths."""
+def _post_review_flag(message_id: str, title: str, review: dict, wiki_path: str, raw_rel: str):
+    """Post an attributed quality-review heads-up to #inbox (entry was still written)."""
+    side_label = {
+        "extraction": "extraction (Python fetch / trafilatura)",
+        "llm": "LLM output",
+        "both": "both extraction and LLM output",
+    }.get(review.get("side", ""), review.get("side", "unknown"))
+    lines = [
+        f"⚠️ **Review flag** — ingested **{title}**, but something looks off.",
+        f"**Likely side:** {side_label}",
+        f"**Why:** {'; '.join(review.get('reasons', []))}",
+    ]
+    if wiki_path:
+        lines.append(f"**Wiki:** {wiki_path}")
+    if raw_rel:
+        lines.append(f"**Raw:** {raw_rel}")
+    post_discord_reply("\n".join(lines), message_id)
+    log.info(f"[review_flag] side={review.get('side')} title={title}")
+
+
+def _apply_ingest_result(
+    result: dict,
+    message_id: str,
+    label: str,
+    *,
+    raw_rel: str = "",
+    extraction_flags: list | None = None,
+):
+    """Write files and post reply from a parsed LLM result. Shared by all paths.
+
+    After writing, runs the combined quality review (Python extraction checks +
+    the LLM's own ``review`` object). The entry is ALWAYS written; if any
+    detector trips, an attributed flag is also posted to #inbox so Drew can see
+    which side (extraction vs LLM) likely went wrong.
+    """
     ingest_type = result.get("type", "unknown")
 
     if ingest_type == "unsupported":
         post_discord_reply(result.get("discord_reply", "Unsupported content type."), message_id)
         return
 
+    wiki_path = ""
     for op in result.get("files", []):
         rel_path = op.get("path", "")
         file_content = op.get("content", "")
@@ -407,9 +483,17 @@ def _apply_ingest_result(result: dict, message_id: str, label: str):
             path.write_text(file_content, encoding="utf-8")
 
         log.info(f"  [{mode}] {rel_path}")
+        # Remember the first substantive wiki page (not the _log append) for the review link.
+        if not wiki_path and not rel_path.endswith("_log.md"):
+            wiki_path = rel_path
 
     post_discord_reply(result.get("discord_reply", f"Ingested: {label}"), message_id)
     log.info(f"Done: {result.get('title', label)}")
+
+    # Quality review — entry is already written; flag (don't block) if anything looks off.
+    review = ingest_review.summarize_review(extraction_flags or [], result.get("review"))
+    if review["flagged"]:
+        _post_review_flag(message_id, result.get("title", label), review, wiki_path, raw_rel)
 
 
 LLM_URL_CAP = 25_000  # chars passed to LLM for URL content
@@ -542,7 +626,7 @@ def run_ingest_youtube(url: str, message_id: str, drew_context: str = "") -> boo
         post_discord_reply(f"⚠️ YouTube ingest failed: LLM error — will retry next cycle", message_id)
         return False
 
-    _apply_ingest_result(result, message_id, url)
+    _apply_ingest_result(result, message_id, url, raw_rel=raw_rel)
     return True
 
 
@@ -551,7 +635,7 @@ def run_ingest(url: str, message_id: str, drew_context: str = "") -> bool:
         return run_ingest_youtube(url, message_id, drew_context=drew_context)
 
     log.info(f"Ingesting URL: {url}")
-    content = fetch_url_content(url)
+    content, used_fallback = fetch_url_content(url)
     # Raw gets full text; LLM gets capped version
     raw_path = write_raw_md("urls", url, content, extra_fm={"url": url})
     raw_rel = vault_rel(raw_path)
@@ -567,6 +651,8 @@ def run_ingest(url: str, message_id: str, drew_context: str = "") -> bool:
     truncated = len(content) > LLM_URL_CAP
     truncation_note = f"\n\n[Content truncated at {LLM_URL_CAP} chars — full text in raw file]" if truncated else ""
     context_note = f"\nDrew's note: {drew_context}" if drew_context else ""
+    # Detector ①: objective extraction-quality flags (independent of the LLM).
+    extraction_flags = ingest_review.check_extraction(content, used_fallback=used_fallback, truncated=truncated)
     try:
         raw = call_llm(
             get_system_prompt(),
@@ -578,7 +664,7 @@ def run_ingest(url: str, message_id: str, drew_context: str = "") -> bool:
         write_retry_queue_entry("lm_failed", url, raw_rel)
         post_discord_reply(f"⚠️ Ingest failed for <{url}>: LLM error — will retry next cycle", message_id)
         return False
-    _apply_ingest_result(result, message_id, url)
+    _apply_ingest_result(result, message_id, url, raw_rel=raw_rel, extraction_flags=extraction_flags)
     return True
 
 
@@ -621,7 +707,7 @@ def run_ingest_voice(att: dict, message_id: str) -> bool:
         post_discord_reply(f"⚠️ Voice ingest failed: LLM error — will retry next cycle", message_id)
         return False
 
-    _apply_ingest_result(result, message_id, f"voice: {filename}")
+    _apply_ingest_result(result, message_id, f"voice: {filename}", raw_rel=raw_rel)
     return True
 
 
@@ -643,7 +729,7 @@ def run_ingest_text(content: str, message_id: str) -> bool:
         write_retry_queue_entry("lm_failed", f"text:{content[:60]}", raw_rel)
         post_discord_reply("⚠️ Text ingest failed: LLM error — will retry next cycle", message_id)
         return False
-    _apply_ingest_result(result, message_id, f"text: {content[:40]}")
+    _apply_ingest_result(result, message_id, f"text: {content[:40]}", raw_rel=raw_rel)
     return True
 
 
@@ -689,7 +775,7 @@ def run_ingest_image(att: dict, message_id: str, drew_context: str = "") -> bool
     write_raw_md("images", Path(filename).stem, sidecar_body,
                  extra_fm={"filename": filename, "raw_binary": raw_bin_rel})
 
-    _apply_ingest_result(result, message_id, f"image: {filename}")
+    _apply_ingest_result(result, message_id, f"image: {filename}", raw_rel=raw_bin_rel)
     return True
 
 
@@ -759,7 +845,7 @@ def run_ingest_pdf(att: dict, message_id: str, drew_context: str = "") -> bool:
         post_discord_reply("⚠️ PDF ingest failed: LLM error — will retry next cycle", message_id)
         return False
 
-    _apply_ingest_result(result, message_id, f"pdf: {filename}")
+    _apply_ingest_result(result, message_id, f"pdf: {filename}", raw_rel=raw_text_rel)
     return True
 
 
@@ -968,9 +1054,11 @@ def main():
     if not DISCORD_BOT_TOKEN:
         log.error("DISCORD_BOT_TOKEN not set in .env — exiting")
         sys.exit(1)
+    # LLM_API_KEY is only needed for API-key providers (Gemini/OpenRouter) and the
+    # image/vision path. CLI providers (codex/claude) use OAuth and local Ollama
+    # needs no key, so a missing key is a warning, not a fatal error.
     if not LLM_API_KEY:
-        log.error("LLM_API_KEY not set in .env — exiting")
-        sys.exit(1)
+        log.warning("LLM_API_KEY not set — fine for codex/claude/ollama; image/vision ingest will fail until set")
 
     state = load_state()
 
