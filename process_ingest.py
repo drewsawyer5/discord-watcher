@@ -122,17 +122,20 @@ def get_llm_client() -> OpenAI:
     return _llm_client
 
 
-def call_llm(system: str, user: str) -> str:
+def call_llm(system: str, user: str, image_path: str | None = None) -> str:
     """Run the ingest prompt through the configured provider; return JSON text.
 
-    Delegates to llm_provider, whose provider is selected by the LLM_PROVIDER env
+    Delegates to llm_provider, whose provider is selected by the INGEST_LLM_* env
     (codex | claude | ollama | openai_compat) so the ingest brain is flippable
     without code changes. The JSON object is extracted from the (possibly
-    prose-wrapped, for CLI providers) response.
+    prose-wrapped, for CLI providers) response. When ``image_path`` is given, the
+    provider analyzes that image (CLI providers read the file by path; the
+    openai-compat backend base64-encodes it).
 
     Args:
         system: The ingest system prompt.
         user: The content to classify/summarize.
+        image_path: Absolute path to an image to analyze, if this is an image ingest.
 
     Returns:
         A JSON string (callers json.loads it).
@@ -142,15 +145,23 @@ def call_llm(system: str, user: str) -> str:
         ValueError: If no JSON object could be parsed from the output.
     """
     # Ingest-scoped provider/model/effort (independent of pa-bot's chat model).
-    # Set these in .env at deploy, e.g. INGEST_LLM_PROVIDER=codex,
-    # INGEST_LLM_MODEL=gpt-5.4-mini, INGEST_LLM_EFFORT=medium.
+    # Set in .env at deploy, e.g. INGEST_LLM_PROVIDER=codex,
+    # INGEST_LLM_MODEL=gpt-5.4-mini, INGEST_LLM_EFFORT=medium. Images can override
+    # via INGEST_IMAGE_PROVIDER/MODEL (default: same brain as text).
+    if image_path:
+        provider = os.getenv("INGEST_IMAGE_PROVIDER") or os.getenv("INGEST_LLM_PROVIDER") or LLM_PROVIDER
+        model = os.getenv("INGEST_IMAGE_MODEL") or os.getenv("INGEST_LLM_MODEL")
+    else:
+        provider = os.getenv("INGEST_LLM_PROVIDER") or LLM_PROVIDER
+        model = os.getenv("INGEST_LLM_MODEL")
     result = llm_provider.call_llm(
         system,
         user,
         json_mode=True,
-        provider=os.getenv("INGEST_LLM_PROVIDER") or LLM_PROVIDER,
-        model=os.getenv("INGEST_LLM_MODEL"),
+        provider=provider,
+        model=model,
         effort=os.getenv("INGEST_LLM_EFFORT"),
+        image_path=image_path,
     )
     if result.error:
         raise RuntimeError(f"LLM error ({result.provider}): {result.error}")
@@ -748,8 +759,6 @@ def run_ingest_text(content: str, message_id: str) -> bool:
 # ---------------------------------------------------------------------------
 def run_ingest_image(att: dict, message_id: str, drew_context: str = "") -> bool:
     filename = att.get("filename", "image.jpg")
-    suffix = Path(filename).suffix.lower()
-    mime_type = IMAGE_MIME.get(suffix, "image/jpeg")
 
     log.info(f"Downloading image: {filename}")
     try:
@@ -760,18 +769,16 @@ def run_ingest_image(att: dict, message_id: str, drew_context: str = "") -> bool
         post_discord_reply(f"⚠️ Image download failed: {e}", message_id)
         return False
 
-    # Save raw binary before LLM call
+    # Save raw binary before LLM call — the provider reads the image from this path.
     raw_bin_path = write_raw_binary("images", filename, resp.content)
     raw_bin_rel = vault_rel(raw_bin_path)
-    image_b64 = base64.b64encode(resp.content).decode("utf-8")
 
     context_note = f"\nDrew's note: {drew_context}" if drew_context else ""
     try:
-        raw = call_llm_with_image(
+        raw = call_llm(
             get_system_prompt(),
             f"Content type: image attachment (Drew dropped this into #inbox)\nFilename: {filename}\nRaw file: [[{raw_bin_rel}]]{context_note}{get_existing_lists_context()}\n\nDescribe and classify this image for the wiki.",
-            image_b64,
-            mime_type,
+            image_path=str(raw_bin_path),
         )
         result = json.loads(raw)
     except Exception as e:
