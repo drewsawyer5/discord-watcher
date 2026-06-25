@@ -43,6 +43,11 @@ LOG_TAIL = 20
 REACH_RETRIES = int(os.environ.get("NUC_REACH_RETRIES", "3"))        # in-tick attempts
 REACH_RETRY_DELAY = int(os.environ.get("NUC_REACH_RETRY_DELAY", "3"))  # seconds between attempts
 UNREACHABLE_DEBOUNCE = int(os.environ.get("NUC_UNREACHABLE_DEBOUNCE", "2"))  # consecutive failing ticks before alert
+# Same idea for the per-service check: a transient `systemctl is-active` blip
+# (SSH hiccup → empty/garbled output) must NOT trigger a disruptive restart +
+# email. Retry in-tick; only a persistently non-active service is treated as down.
+# (Added 2026-06-25 after false "was DOWN — auto-restart OK" alerts on healthy services.)
+SVC_CHECK_RETRIES = int(os.environ.get("NUC_SVC_CHECK_RETRIES", "3"))
 def _find_bash():
     # PATH-independent: scheduled tasks (S4U) have a different PATH where
     # which("bash") can resolve to a broken npm shim. Prefer known Git Bash.
@@ -122,8 +127,23 @@ def nuc_reachable():
 
 
 def svc_active(svc):
-    _, out, _ = ssh(["systemctl", "is-active", svc])
-    return out.strip()
+    """Return `systemctl is-active <svc>`, retrying to ride out transient blips.
+
+    A single SSH/systemctl hiccup can return "" or a non-active string for a
+    service that is actually fine; reporting that as down triggers a needless
+    restart + alert. Retry in-tick and only report a non-active status if it
+    persists across attempts.
+    """
+    last = ""
+    for attempt in range(1, SVC_CHECK_RETRIES + 1):
+        _, out, _ = ssh(["systemctl", "is-active", svc])
+        last = out.strip()
+        if last == "active":
+            return last
+        if attempt < SVC_CHECK_RETRIES:
+            log(f"{svc} is-active={last!r} (attempt {attempt}/{SVC_CHECK_RETRIES}) — retrying in {REACH_RETRY_DELAY}s")
+            time.sleep(REACH_RETRY_DELAY)
+    return last
 
 
 def svc_log_tail(svc, n=LOG_TAIL):
