@@ -131,6 +131,13 @@ def _notify_fallback(via: str, filename: str, error: str | None) -> None:
     if post_discord_message is None or not FALLBACK_NOTIFY_CHANNEL:
         return
 
+    if via == "local" and not WHISPER_ENDPOINT:
+        # No Tower configured — local IS the primary path, not a fallback.
+        # Stay quiet; only genuine failures below are worth a ping.
+        with _notify_lock:
+            _last_via = via
+        return
+
     with _notify_lock:
         previous = _last_via
         _last_via = via
