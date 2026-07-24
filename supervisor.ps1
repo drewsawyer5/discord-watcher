@@ -45,20 +45,12 @@ try {
 # Do NOT re-enable here. See [[Monitoring & Logs (NUC Consolidation)]] Step 2.
 Write-Log "process_ingest.py SKIPPED on A6 - owned by NUC (dedup 2026-06-22)"
 
-# --- Check tower_uptime_monitor.py ---
-try {
-    $procs = Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like "*tower_uptime_monitor.py*" }
-    if ($procs) {
-        $procId = ($procs | Select-Object -First 1).ProcessId
-        Write-Log "tower_uptime_monitor.py OK - pid $procId"
-    } else {
-        Write-Log "tower_uptime_monitor.py NOT running - restarting"
-        Start-Process "cmd.exe" -ArgumentList "/c `"$watcherDir\launch_uptime_monitor.bat`"" -WorkingDirectory $watcherDir -WindowStyle Hidden
-        Write-Log "tower_uptime_monitor.py start issued"
-    }
-} catch {
-    Write-Log "tower_uptime_monitor check error - $($_.Exception.Message)"
-}
+# --- tower_uptime_monitor.py: DISABLED (2026-07-24, Tower hardware dead) ---
+# The Tower died completely; WHISPER_ENDPOINT is commented out in Drew_code/.env
+# and the monitor refuses to start without it (5-min refuse-and-exit loop here).
+# Re-enable this block when a WhisperX host exists again (Tower rebuild).
+# See vault: 5 - Storage/05 - Raw Ingests/Notes/2026-07-24-context-tower-death-inventory.md
+Write-Log "tower_uptime_monitor.py SKIPPED - Tower dead 2026-07-24, no WHISPER_ENDPOINT"
 
 # --- Check Claude --channels session ---
 try {
