@@ -48,6 +48,10 @@ UNREACHABLE_DEBOUNCE = int(os.environ.get("NUC_UNREACHABLE_DEBOUNCE", "2"))  # c
 # email. Retry in-tick; only a persistently non-active service is treated as down.
 # (Added 2026-06-25 after false "was DOWN — auto-restart OK" alerts on healthy services.)
 SVC_CHECK_RETRIES = int(os.environ.get("NUC_SVC_CHECK_RETRIES", "3"))
+# The restart path is destructive (sudo systemctl restart) and, unlike the
+# unreachable path, had no cross-tick debounce: one bad tick = one restart.
+# Require this many consecutive ticks of non-active before restarting.
+SVC_DOWN_DEBOUNCE = int(os.environ.get("NUC_SVC_DOWN_DEBOUNCE", "2"))
 def _find_bash():
     # PATH-independent: scheduled tasks (S4U) have a different PATH where
     # which("bash") can resolve to a broken npm shim. Prefer known Git Bash.
@@ -133,16 +137,25 @@ def svc_active(svc):
     service that is actually fine; reporting that as down triggers a needless
     restart + alert. Retry in-tick and only report a non-active status if it
     persists across attempts.
+
+    Returns None when the answer is unknown: an SSH transport failure (rc 255)
+    says nothing about the service. `systemctl is-active` itself exits non-zero
+    for a genuinely inactive service but still prints the status word, so
+    "transport failed" is rc 255 with empty stdout — never conflate the two.
     """
     last = ""
+    transport_failed = False
     for attempt in range(1, SVC_CHECK_RETRIES + 1):
-        _, out, _ = ssh(["systemctl", "is-active", svc])
+        rc, out, _ = ssh(["systemctl", "is-active", svc])
         last = out.strip()
+        transport_failed = (rc == 255 and not last)
         if last == "active":
             return last
         if attempt < SVC_CHECK_RETRIES:
-            log(f"{svc} is-active={last!r} (attempt {attempt}/{SVC_CHECK_RETRIES}) — retrying in {REACH_RETRY_DELAY}s")
+            log(f"{svc} is-active={last!r} rc={rc} (attempt {attempt}/{SVC_CHECK_RETRIES}) — retrying in {REACH_RETRY_DELAY}s")
             time.sleep(REACH_RETRY_DELAY)
+    if transport_failed:
+        return None
     return last
 
 
@@ -167,7 +180,7 @@ def run_check():
     if not reach:
         return
     for svc in SERVICES:
-        print(f"  {svc}: {svc_active(svc)}")
+        print(f"  {svc}: {svc_active(svc) or 'UNKNOWN (ssh transport failure)'}")
 
 
 def main():
@@ -205,19 +218,39 @@ def main():
         log(f"NUC reachable again — clearing {state['unreachable_misses']} miss(es)")
     state["unreachable_misses"] = 0
     if not state.get("nuc_reachable", True):
-        send_email("[NUC Watchdog] NUC back online",
-                   f"NUC ({NUC}) is reachable again as of {now_iso()}.")
-    state["nuc_reachable"] = True
+        # Only consume the state transition if the all-clear actually left —
+        # otherwise the mailbox's last word stays "power-cycle needed" forever
+        # (happened 2026-07-11: the recovery email 401'd and was never resent).
+        if send_email("[NUC Watchdog] NUC back online",
+                      f"NUC ({NUC}) is reachable again as of {now_iso()}."):
+            state["nuc_reachable"] = True
+        else:
+            log("NUC back online but all-clear email FAILED — leaving state down so it retries next tick")
+    else:
+        state["nuc_reachable"] = True
 
     # 2) per-service health
     for svc in SERVICES:
         st = state["services"].setdefault(svc, {"down": False, "restarts": [], "last_alert": 0})
-        if svc_active(svc) == "active":
+        status = svc_active(svc)
+        if status is None:
+            log(f"{svc} status UNKNOWN (SSH transport failure) — no restart/alert this tick")
+            continue
+        if status == "active":
             if st.get("down"):
                 send_email(f"[NUC Watchdog] {svc} recovered",
                            f"{svc} is active again as of {now_iso()}.")
             st["down"] = False
+            st["down_misses"] = 0
             continue
+
+        # non-active over a working transport — debounce before the destructive path
+        misses = st.get("down_misses", 0) + 1
+        st["down_misses"] = misses
+        if misses < SVC_DOWN_DEBOUNCE:
+            log(f"{svc} is-active={status!r} — miss {misses}/{SVC_DOWN_DEBOUNCE} (debounce, no restart yet)")
+            continue
+        st["down_misses"] = 0
 
         # DOWN
         tail = svc_log_tail(svc)
@@ -246,6 +279,13 @@ def main():
 
     save_state(state)
     log("watchdog run complete")
+    # Dead-man heartbeat: Kuma push monitor "Job: NUC watchdog tick" — silence
+    # past 15 min means this watchdog stopped running (a crash exits before this).
+    try:
+        import urllib.request
+        urllib.request.urlopen("http://100.99.196.69:3001/api/push/VYqtHb97nL", timeout=10)
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":

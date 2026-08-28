@@ -59,9 +59,9 @@ if sys.stderr.encoding != "utf-8":
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 _log_file = Path(__file__).parent / "ingest.log"
-logging.getLogger().addHandler(
-    logging.handlers.RotatingFileHandler(_log_file, maxBytes=1_000_000, backupCount=2, encoding="utf-8")
-)
+_file_handler = logging.handlers.RotatingFileHandler(_log_file, maxBytes=1_000_000, backupCount=2, encoding="utf-8")
+_file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+logging.getLogger().addHandler(_file_handler)
 log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
