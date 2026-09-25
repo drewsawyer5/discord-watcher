@@ -40,6 +40,8 @@ import discord_voice
 
 # Local: objective extraction checks + attributed review combiner.
 import ingest_review
+# Local: the lane as a thin client of SLATE's knowledge door (#161) — best-effort, never blocks the wiki path.
+import slate_door
 
 # Cross-repo (Phase A): the provider-flippable brain lives in pa-bot. Path-insert
 # is the same pattern used above for discord_voice; in Phase C ingest relocates
@@ -508,8 +510,13 @@ def _apply_ingest_result(
     raw_rel: str = "",
     extraction_flags: list | None = None,
     source: str = "",
+    slate_source: dict | None = None,
 ):
     """Write files and post reply from a parsed LLM result. Shared by all paths.
+
+    `slate_source` is the Source the drop became at SLATE's door (or None when the
+    door was unreachable / unconfigured); its id is appended to the reply so Drew
+    sees where the capture lives beside the wiki page.
 
     After writing, runs the combined quality review (Python extraction checks +
     the LLM's own ``review`` object). The entry is ALWAYS written; if any
@@ -551,7 +558,7 @@ def _apply_ingest_result(
         if not wiki_path and not rel_path.endswith("_log.md"):
             wiki_path = rel_path
 
-    post_discord_reply(result.get("discord_reply", f"Ingested: {label}"), message_id)
+    post_discord_reply(result.get("discord_reply", f"Ingested: {label}") + slate_door.reply_suffix(slate_source), message_id)
     log.info(f"Done: {result.get('title', label)}")
 
     # Quality review — entry is already written; flag (don't block) if anything looks off.
@@ -702,6 +709,7 @@ def run_ingest(url: str, message_id: str, drew_context: str = "") -> bool:
         return run_ingest_youtube(url, message_id, drew_context=drew_context)
 
     log.info(f"Ingesting URL: {url}")
+    slate_source = slate_door.capture_url(url)  # SLATE fetches + snapshots the page itself
     content, used_fallback = fetch_url_content(url)
     # Raw gets full text; LLM gets capped version
     raw_path = write_raw_md("urls", url, content, extra_fm={"url": url})
@@ -731,7 +739,7 @@ def run_ingest(url: str, message_id: str, drew_context: str = "") -> bool:
         write_retry_queue_entry("lm_failed", url, raw_rel)
         post_discord_reply(f"⚠️ Ingest failed for <{url}>: LLM error — will retry next cycle", message_id)
         return False
-    _apply_ingest_result(result, message_id, url, raw_rel=raw_rel, extraction_flags=extraction_flags)
+    _apply_ingest_result(result, message_id, url, raw_rel=raw_rel, extraction_flags=extraction_flags, slate_source=slate_source)
     return True
 
 
@@ -761,6 +769,7 @@ def run_ingest_voice(att: dict, message_id: str) -> bool:
     filename = att.get("filename", "voice.ogg")
     raw_path = write_raw_md("voice", Path(filename).stem, transcript, extra_fm={"filename": filename})
     raw_rel = vault_rel(raw_path)
+    slate_source = slate_door.capture_text(transcript, name=f"voice: {Path(filename).stem}")
 
     try:
         raw = call_llm(
@@ -774,7 +783,7 @@ def run_ingest_voice(att: dict, message_id: str) -> bool:
         post_discord_reply(f"⚠️ Voice ingest failed: LLM error — will retry next cycle", message_id)
         return False
 
-    _apply_ingest_result(result, message_id, f"voice: {filename}", raw_rel=raw_rel)
+    _apply_ingest_result(result, message_id, f"voice: {filename}", raw_rel=raw_rel, slate_source=slate_source)
     return True
 
 
@@ -785,6 +794,7 @@ def run_ingest_text(content: str, message_id: str) -> bool:
     log.info(f"Ingesting text drop: {content[:80]}")
     raw_path = write_raw_md("text", content[:40], content)
     raw_rel = vault_rel(raw_path)
+    slate_source = slate_door.capture_text(content)
     try:
         raw = call_llm(
             get_system_prompt(),
@@ -796,7 +806,7 @@ def run_ingest_text(content: str, message_id: str) -> bool:
         write_retry_queue_entry("lm_failed", f"text:{content[:60]}", raw_rel)
         post_discord_reply("⚠️ Text ingest failed: LLM error — will retry next cycle", message_id)
         return False
-    _apply_ingest_result(result, message_id, f"text: {content[:40]}", raw_rel=raw_rel)
+    _apply_ingest_result(result, message_id, f"text: {content[:40]}", raw_rel=raw_rel, slate_source=slate_source)
     return True
 
 
@@ -818,6 +828,7 @@ def run_ingest_image(att: dict, message_id: str, drew_context: str = "") -> bool
     # Save raw binary before LLM call — the provider reads the image from this path.
     raw_bin_path = write_raw_binary("images", filename, resp.content)
     raw_bin_rel = vault_rel(raw_bin_path)
+    slate_source = slate_door.capture_file(filename, resp.content, mime=IMAGE_MIME.get(Path(filename).suffix.lower()))
 
     context_note = f"\nDrew's note: {drew_context}" if drew_context else ""
     try:
@@ -838,7 +849,7 @@ def run_ingest_image(att: dict, message_id: str, drew_context: str = "") -> bool
     write_raw_md("images", Path(filename).stem, sidecar_body,
                  extra_fm={"filename": filename, "raw_binary": raw_bin_rel})
 
-    _apply_ingest_result(result, message_id, f"image: {filename}", raw_rel=raw_bin_rel)
+    _apply_ingest_result(result, message_id, f"image: {filename}", raw_rel=raw_bin_rel, slate_source=slate_source)
     return True
 
 
@@ -874,6 +885,7 @@ def run_ingest_pdf(att: dict, message_id: str, drew_context: str = "") -> bool:
     # Save raw PDF binary before extraction
     raw_bin_path = write_raw_binary("pdfs", filename, resp.content)
     raw_bin_rel = vault_rel(raw_bin_path)
+    slate_source = slate_door.capture_file(filename, resp.content, mime="application/pdf")
 
     try:
         text = _extract_pdf_text(resp.content)
@@ -908,7 +920,7 @@ def run_ingest_pdf(att: dict, message_id: str, drew_context: str = "") -> bool:
         post_discord_reply("⚠️ PDF ingest failed: LLM error — will retry next cycle", message_id)
         return False
 
-    _apply_ingest_result(result, message_id, f"pdf: {filename}", raw_rel=raw_text_rel)
+    _apply_ingest_result(result, message_id, f"pdf: {filename}", raw_rel=raw_text_rel, slate_source=slate_source)
     return True
 
 
@@ -929,6 +941,9 @@ def run_ingest_pdf_local(file_path: Path) -> bool:
     # Save raw binary to raw ingests
     raw_bin_path = write_raw_binary("pdfs", filename, pdf_bytes)
     raw_bin_rel = vault_rel(raw_bin_path)
+    slate_source = slate_door.capture_file(filename, pdf_bytes, mime="application/pdf")
+    if slate_source:
+        log.info(f"  drop-folder PDF also at {slate_door.describe(slate_source)}")
 
     try:
         text = _extract_pdf_text(pdf_bytes)
