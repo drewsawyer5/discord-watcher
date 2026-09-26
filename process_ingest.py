@@ -617,6 +617,7 @@ def run_ingest_youtube(url: str, message_id: str, drew_context: str = "") -> boo
         return False
 
     title      = meta.get("title", "Unknown Title")
+    slate_source = slate_door.capture_url(url, name=title)  # every drop reaches the door (#161)
     channel    = meta.get("channel") or meta.get("uploader", "Unknown")
     upload_dt  = meta.get("upload_date", "")  # YYYYMMDD
     upload_iso = f"{upload_dt[:4]}-{upload_dt[4:6]}-{upload_dt[6:]}" if len(upload_dt) == 8 else upload_dt
@@ -666,7 +667,10 @@ def run_ingest_youtube(url: str, message_id: str, drew_context: str = "") -> boo
         queue_path.parent.mkdir(parents=True, exist_ok=True)
         with queue_path.open("a", encoding="utf-8") as f:
             f.write(f"- [ ] {today} — {url} [NO-CAPTIONS]\n")
-        post_discord_reply(f"⚠️ YouTube — no captions available for <{url}>. Queued for whisper fallback.", message_id)
+        post_discord_reply(
+            f"⚠️ YouTube — no captions available for <{url}>. Queued for whisper fallback." + slate_door.reply_suffix(slate_source),
+            message_id,
+        )
         return True
 
     # Step 4 — call LLM to build wiki page
@@ -700,7 +704,7 @@ def run_ingest_youtube(url: str, message_id: str, drew_context: str = "") -> boo
         post_discord_reply(f"⚠️ YouTube ingest failed: LLM error — will retry next cycle", message_id)
         return False
 
-    _apply_ingest_result(result, message_id, url, raw_rel=raw_rel)
+    _apply_ingest_result(result, message_id, url, raw_rel=raw_rel, slate_source=slate_source)
     return True
 
 
@@ -719,7 +723,10 @@ def run_ingest(url: str, message_id: str, drew_context: str = "") -> bool:
     if content.startswith("[Fetch failed:"):
         write_retry_queue_entry("fetch_failed", url, raw_rel)
         log.info(f"Fetch failed for {url} — logged to retry queue, skipping LLM")
-        post_discord_reply(f"⚠️ Could not fetch <{url}> (blocked/403) — logged to retry queue for manual handling.", message_id)
+        post_discord_reply(
+            f"⚠️ Could not fetch <{url}> (blocked/403) — logged to retry queue for manual handling." + slate_door.reply_suffix(slate_source),
+            message_id,
+        )
         return True  # Not a retryable LLM failure — don't add to failed_ids
 
     llm_content = content[:LLM_URL_CAP]
@@ -896,7 +903,8 @@ def run_ingest_pdf(att: dict, message_id: str, drew_context: str = "") -> bool:
 
     if not text:
         post_discord_reply(
-            "⚠️ PDF appears to be image-only — text extraction returned nothing. Drop via Claude session for vision-based ingest.",
+            "⚠️ PDF appears to be image-only — text extraction returned nothing. Drop via Claude session for vision-based ingest."
+            + slate_door.reply_suffix(slate_source),
             message_id,
         )
         return True  # Not a retry-able failure
@@ -1152,6 +1160,7 @@ def main():
         log.info(f"Resuming from message ID {state['last_message_id']}")
 
     log.info(f"Polling channel {INGEST_CHANNEL_ID} every {POLL_INTERVAL}s | {LLM_PROVIDER} / {LLM_MODEL}")
+    log.info(slate_door.status_line())
 
     while True:
         try:

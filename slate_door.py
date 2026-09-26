@@ -21,7 +21,9 @@ import requests
 log = logging.getLogger(__name__)
 
 ORIGIN = "ingest-lane"
-TIMEOUT_S = 60
+# (connect, read): a sleeping A6 drops packets rather than refusing, so the connect leg must be short or
+# every capture stalls the single-threaded lane for the full read timeout (review 2026-09-26).
+TIMEOUT_S = (5, 60)
 
 
 def configured() -> bool:
@@ -38,22 +40,37 @@ def _headers() -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"} if token else {}
 
 
+def status_line() -> str:
+    """One line for the startup log so an unset URL is visible instead of a silent wiki-only lane."""
+    if not configured():
+        return "SLATE door: off (SLATE_API_URL unset - wiki-only)"
+    token = "service token set" if os.getenv("SLATE_JOBS_TOKEN", "").strip() else "no token - loopback only"
+    return f"SLATE door: on ({_base_url()}, {token})"
+
+
 def _post(*, json_body: dict | None = None, files: dict | None = None, data: dict | None = None) -> dict | None:
+    """POST to the door; None on any failure whatsoever — this call must never take the wiki path down."""
     if not configured():
         return None
     url = f"{_base_url()}/knowledge/sources"
     try:
         resp = requests.post(url, json=json_body, files=files, data=data, headers=_headers(), timeout=TIMEOUT_S)
+        if resp.status_code not in (200, 201):
+            log.warning(f"SLATE door refused ({resp.status_code}): {resp.text[:200]}")
+            return None
+        try:
+            source = resp.json()
+        except ValueError:
+            log.warning("SLATE door returned non-JSON")
+            return None
+        if not isinstance(source, dict) or "id" not in source:
+            log.warning(f"SLATE door returned {type(source).__name__} without a Source id")
+            return None
     except requests.RequestException as e:
         log.warning(f"SLATE door unreachable ({url}): {e}")
         return None
-    if resp.status_code not in (200, 201):
-        log.warning(f"SLATE door refused ({resp.status_code}): {resp.text[:200]}")
-        return None
-    try:
-        source = resp.json()
-    except ValueError:
-        log.warning("SLATE door returned non-JSON")
+    except Exception as e:  # noqa: BLE001 - best-effort means best-effort
+        log.warning(f"SLATE door call failed: {type(e).__name__}: {e}")
         return None
     log.info(f"  [slate] {describe(source)}")
     return source
@@ -92,7 +109,7 @@ def capture_file(filename: str, data: bytes, mime: str | None = None, kind: str 
 
 def describe(source: dict | None) -> str:
     """One short clause for logs and the Discord reply: `SLATE source #7` or the duplicate it points at."""
-    if not source:
+    if not source or not isinstance(source, dict):
         return ""
     if source.get("duplicate_of") is not None:
         return f"SLATE source #{source['duplicate_of']} (already captured)"

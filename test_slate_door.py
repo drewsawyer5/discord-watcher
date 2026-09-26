@@ -63,5 +63,42 @@ class SlateDoorTests(unittest.TestCase):
         self.assertEqual(slate_door.reply_suffix(None), "")
 
 
+class SlateDoorHardeningTests(unittest.TestCase):
+    """Review 2026-09-26: best-effort means best-effort — nothing the door answers or fails with reaches the wiki path."""
+
+    ENV = {"SLATE_API_URL": "http://a6:8080/api", "SLATE_JOBS_TOKEN": "tok"}
+
+    def test_a_2xx_whose_body_is_not_an_object_is_a_miss_not_a_crash(self):
+        with patch.dict("os.environ", self.ENV, clear=False):
+            with patch.object(slate_door.requests, "post", return_value=_resp(200, body=[1, 2])):
+                self.assertIsNone(slate_door.capture_text("hello"))
+            with patch.object(slate_door.requests, "post", return_value=_resp(201, body="ok")):
+                self.assertIsNone(slate_door.capture_url("https://example.com"))
+            with patch.object(slate_door.requests, "post", return_value=_resp(201, body={"detail": "odd"})):
+                self.assertIsNone(slate_door.capture_file("a.pdf", b"%PDF"))  # a dict with no id is not a Source either
+
+    def test_timeouts_and_unexpected_errors_never_escape(self):
+        with patch.dict("os.environ", self.ENV, clear=False):
+            with patch.object(slate_door.requests, "post", side_effect=slate_door.requests.Timeout("slow")):
+                self.assertIsNone(slate_door.capture_text("hello"))
+            with patch.object(slate_door.requests, "post", side_effect=RuntimeError("boom")):
+                self.assertIsNone(slate_door.capture_text("hello"))
+
+    def test_connect_timeout_is_short_and_read_timeout_long(self):
+        with patch.dict("os.environ", self.ENV, clear=False), patch.object(
+            slate_door.requests, "post", return_value=_resp(201, {"id": 1, "duplicate_of": None})
+        ) as post:
+            slate_door.capture_text("hello")
+        self.assertEqual(post.call_args.kwargs["timeout"], (5, 60))
+
+    def test_status_line_says_whether_the_door_is_on(self):
+        with patch.dict("os.environ", {"SLATE_API_URL": "", "SLATE_JOBS_TOKEN": ""}, clear=False):
+            self.assertEqual(slate_door.status_line(), "SLATE door: off (SLATE_API_URL unset - wiki-only)")
+        with patch.dict("os.environ", self.ENV, clear=False):
+            self.assertEqual(slate_door.status_line(), "SLATE door: on (http://a6:8080/api, service token set)")
+        with patch.dict("os.environ", {"SLATE_API_URL": "http://localhost:8080/api", "SLATE_JOBS_TOKEN": ""}, clear=False):
+            self.assertEqual(slate_door.status_line(), "SLATE door: on (http://localhost:8080/api, no token - loopback only)")
+
+
 if __name__ == "__main__":
     unittest.main()
