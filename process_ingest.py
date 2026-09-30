@@ -42,6 +42,8 @@ import discord_voice
 import ingest_review
 # Local: the lane as a thin client of SLATE's knowledge door (#161) — best-effort, never blocks the wiki path.
 import slate_door
+# Local: register with SLATE as a Service and heartbeat it (#172) — a daemon thread, never blocks the lane.
+import slate_heartbeat
 
 # Cross-repo (Phase A): the provider-flippable brain lives in pa-bot. Path-insert
 # is the same pattern used above for discord_voice; in Phase C ingest relocates
@@ -1161,6 +1163,7 @@ def main():
 
     log.info(f"Polling channel {INGEST_CHANNEL_ID} every {POLL_INTERVAL}s | {LLM_PROVIDER} / {LLM_MODEL}")
     log.info(slate_door.status_line())
+    slate_heartbeat.start("discord-watcher")
 
     while True:
         try:
