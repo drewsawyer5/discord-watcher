@@ -38,12 +38,12 @@ try {
     Write-Log "voice_watcher check error - $($_.Exception.Message)"
 }
 
-# --- process_ingest.py: MOVED TO NUC (2026-06-22, Step 2 dedup) ---
-# Ingest now runs SOLELY on the NUC (discord-watcher.service). A6 must NOT
-# poll the ingest channel too — both polling 1474888214639546631 caused every
-# #inbox message to be double-processed into the shared (Syncthing) vault.
-# Do NOT re-enable here. See [[Monitoring & Logs (NUC Consolidation)]] Step 2.
-Write-Log "process_ingest.py SKIPPED on A6 - owned by NUC (dedup 2026-06-22)"
+# --- process_ingest.py: RETIRED (2026-10-03, life-org #233 / #199, Drew's call) ---
+# The #inbox Discord lane is gone on both boxes: the NUC's discord-watcher.service is disabled and removed, the
+# code is deleted from this repo, and the SLATE Service row `discord-watcher` was retired. Anything that used to
+# be dropped in #inbox goes through SLATE's knowledge door now (Drop page / share target / POST
+# /api/knowledge/sources). Ran on A6 2026-06-22 -> NUC -> back to A6 for 20 minutes on cutover night, then retired.
+Write-Log "process_ingest.py RETIRED - #inbox lane replaced by SLATE knowledge drop (2026-10-03)"
 
 # --- tower_uptime_monitor.py: DISABLED (2026-07-24, Tower hardware dead) ---
 # The Tower died completely; WHISPER_ENDPOINT is commented out in Drew_code/.env

@@ -1,13 +1,17 @@
 # discord-watcher
 
-Always-on background ingest processor for Drew's PA system.
+A6's Discord-side plumbing for Drew's Claude session. **The #inbox ingest lane is retired (2026-10-03, life-org #233 / #199):**
+anything that used to be dropped in #inbox goes through SLATE's knowledge door now (Drop page, PWA share target,
+`POST /api/knowledge/sources`). The NUC watchdog retired the same night (ADR 0019 §1: each box runs only its own plumbing;
+Kuma on the NUC, the Healthchecks dead-man and SLATE's Services cover it).
 
 ## What it does
 
-Polls Discord #inbox and processes two content types without needing a Claude session:
-
-- **URLs** → fetches page content → Gemini Flash → wiki page in `6 - Wiki Hub/Sources/`
-- **Voice messages** -> WhisperX tower via `WHISPER_ENDPOINT` (local faster-whisper fallback) -> Gemini Flash -> wiki note in `6 - Wiki Hub/Topics/`
+- **Voice for the Claude session** (`voice_watcher.py` + `discord_voice.py`): a `.ogg` landing in the Discord channel inbox is
+  transcribed with local faster-whisper and written beside it as `.txt`, which the session reads.
+- **Session plumbing**: `session_start.py` (the "session starting" Discord ping), `restart.py` + `supervisor.ps1` (keep the
+  Claude `--channels` session and the voice watcher alive; Task Scheduler "Discord PA Watchdog" runs the supervisor every
+  5 min), `launch_claude.bat` (the session launcher), `sync_skill_stubs.py` (SessionStart hook: vault skills -> command stubs).
 
 A PowerShell supervisor (`supervisor.ps1`) keeps the watcher processes running and restarts them on crash.
 
