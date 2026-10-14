@@ -43,6 +43,8 @@ SOAK_LOG = Path(__file__).parent / "whisperx_soak.jsonl"
 HEARTBEAT_INTERVAL = 300  # seconds (5 minutes)
 INBOX_MAX_AGE_HOURS = int(os.getenv("INBOX_MAX_AGE_HOURS", "72"))
 CLEANUP_INTERVAL = 3600  # seconds (1 hour)
+# Written next to an .ogg while it is being transcribed; the no-rewhisper hook reads it (#351).
+MARKER_SUFFIX = ".transcribing"
 
 # Discord notification config — single channel for fallback alerts
 FALLBACK_NOTIFY_CHANNEL = os.getenv("FALLBACK_NOTIFY_CHANNEL", "1474888067893559360").strip()
@@ -108,6 +110,16 @@ def cleanup_old_inbox_files():
                 log.warning(f"Could not delete {f.name}: {e}")
     if removed:
         log.info(f"Inbox cleanup: removed {removed} files older than {INBOX_MAX_AGE_HOURS}h")
+
+
+def cleanup_stale_markers():
+    """Remove `.transcribing` markers left by a previous run (#351): nothing is transcribing at startup."""
+    for f in INBOX_DIR.glob(f"*{MARKER_SUFFIX}"):
+        try:
+            f.unlink()
+            log.info(f"Removed stale marker {f.name}")
+        except Exception as e:
+            log.warning(f"Could not delete {f.name}: {e}")
 
 
 def cleanup_loop():
@@ -226,7 +238,12 @@ def process_ogg(ogg_path: Path):
             return
         _in_progress.add(key)
     log.info(f"Transcribing: {ogg_path.name}")
+    marker = ogg_path.with_suffix(MARKER_SUFFIX)
     try:
+        try:
+            marker.write_text(datetime.now().isoformat(timespec="seconds"), encoding="utf-8")
+        except Exception as exc:
+            log.warning(f"Could not write {marker.name}: {exc}")
         result = discord_voice.transcribe_with_fallback(ogg_path)
         via = result.get("via", "failed")
         latency_ms = result.get("latency_ms", 0)
@@ -254,6 +271,10 @@ def process_ogg(ogg_path: Path):
         _notify_fallback(via, ogg_path.name, result.get("error"))
         write_heartbeat()
     finally:
+        try:
+            marker.unlink(missing_ok=True)
+        except Exception as exc:
+            log.warning(f"Could not remove {marker.name}: {exc}")
         with _processing_lock:
             _in_progress.discard(key)
 
@@ -303,6 +324,7 @@ def main():
     threading.Thread(target=cleanup_loop, daemon=True).start()
 
     cleanup_old_inbox_files()
+    cleanup_stale_markers()
     for ogg in sorted(INBOX_DIR.glob("*.ogg")):
         _handle_event_safely(ogg)
 
