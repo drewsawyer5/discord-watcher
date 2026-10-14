@@ -15,4 +15,6 @@ status.json
 twitter_cookies.json
 whisperx_soak.jsonl
 tower_uptime.json
-.synthetic_test_tmp/
+.synthetic_test_tmp/# SLATE beat state + the #339 Break-glass ping URL (a secret) (#347)
+*.retired
+*.hc-ping-url

@@ -13,6 +13,7 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
 import discord_voice
+import slate_beat
 try:
     from discord_client import post_discord_message
 except Exception:  # pragma: no cover - Discord notify is best-effort
@@ -41,6 +42,10 @@ STATUS_FILE = Path(__file__).parent / "status.json"
 WATCHER_LOG = Path(__file__).parent / "voice_watcher.log"
 SOAK_LOG = Path(__file__).parent / "whisperx_soak.jsonl"
 HEARTBEAT_INTERVAL = 300  # seconds (5 minutes)
+# SLATE's Services table hears from us every minute; SLATE pushes after 3 min of silence (#347, Comms Service).
+SLATE_BEAT_INTERVAL = 60
+SLATE_SERVICE = "voice-watcher"
+SLATE_ALLOWANCE_S = 90  # the Status page's "up" allowance: one beat plus slack
 INBOX_MAX_AGE_HOURS = int(os.getenv("INBOX_MAX_AGE_HOURS", "72"))
 CLEANUP_INTERVAL = 3600  # seconds (1 hour)
 # Written next to an .ogg while it is being transcribed; the no-rewhisper hook reads it (#351).
@@ -90,10 +95,41 @@ def write_heartbeat():
     )
 
 
-def heartbeat_loop():
+def make_slate_beat():
+    """The SLATE client for `voice-watcher` (SLATE_API_URL + SLATE_JOBS_TOKEN), or None when SLATE is not configured."""
+    return slate_beat.from_env(SLATE_SERVICE, interval_s=SLATE_ALLOWANCE_S, details=_slate_details)
+
+
+def _slate_details():
+    return {
+        "files_transcribed": files_transcribed,
+        "files_via_local": files_via_local,
+        "files_failed": files_failed,
+        "current_via": _last_via,
+    }
+
+
+def heartbeat_loop(slate=None, sleep=time.sleep):
+    """Beat SLATE every SLATE_BEAT_INTERVAL and write status.json every HEARTBEAT_INTERVAL.
+
+    SLATE answering 410 (retired) stops the SLATE beat for good; the local status file carries on.
+    """
+    every = HEARTBEAT_INTERVAL // SLATE_BEAT_INTERVAL
+    tick = 0
     while True:
-        write_heartbeat()
-        time.sleep(HEARTBEAT_INTERVAL)
+        if tick % every == 0:
+            try:
+                write_heartbeat()
+            except Exception as exc:
+                log.warning(f"status.json write failed: {exc}")
+        if slate is not None:
+            try:
+                if slate.beat() == "retired":
+                    slate = None
+            except Exception as exc:  # slate_beat swallows its own errors; this is belt and braces
+                log.warning(f"SLATE beat raised: {exc}")
+        tick += 1
+        sleep(SLATE_BEAT_INTERVAL)
 
 
 def cleanup_old_inbox_files():
@@ -320,7 +356,9 @@ def main():
             log.warning(f"Local model pre-warm failed (will retry on demand): {exc}")
 
     write_heartbeat()
-    threading.Thread(target=heartbeat_loop, daemon=True).start()
+    slate = make_slate_beat()
+    log.info(f"SLATE beat: {'on, ' + SLATE_SERVICE + ' every ' + str(SLATE_BEAT_INTERVAL) + 's' if slate else 'off (SLATE_API_URL unset)'}")
+    threading.Thread(target=heartbeat_loop, kwargs={"slate": slate}, daemon=True).start()
     threading.Thread(target=cleanup_loop, daemon=True).start()
 
     cleanup_old_inbox_files()

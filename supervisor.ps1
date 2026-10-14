@@ -52,12 +52,39 @@ Write-Log "process_ingest.py RETIRED - #inbox lane replaced by SLATE knowledge d
 # See vault: 5 - Storage/05 - Raw Ingests/Notes/2026-07-24-context-tower-death-inventory.md
 Write-Log "tower_uptime_monitor.py SKIPPED - Tower dead 2026-07-24, no WHISPER_ENDPOINT"
 
-# --- Check Claude --channels session ---
+# --- Check the Break-glass Discord Claude session (life-org #347) ---
+# Match on the Discord channel plugin, not "--channels": a SLATE chat session on A6 also runs with --channels
+# (or --dangerously-load-development-channels) and must never be mistaken for Break-glass, neither for the
+# beat nor for the restart below.
+$slateBeat  = Join-Path $watcherDir "slate_beat.py"
+# Hook point for #339 (Break-glass outside check): put the Healthchecks ping URL in this file (one line, a secret:
+# never log it). Missing or empty file = no ping. It does not depend on SLATE, which is the point.
+$hcPingFile = Join-Path $watcherDir "break-glass.hc-ping-url"
 try {
-    $procs = Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like "*--channels*" }
+    $procs = Get-CimInstance Win32_Process | Where-Object { $_.Name -like "claude*" -and $_.CommandLine -like "*plugin:discord*" }
     if ($procs) {
         $procId = ($procs | Select-Object -First 1).ProcessId
         Write-Log "claude OK - pid $procId"
+        # SLATE Services: beat break-glass (SLATE pushes after 8 min of silence). A 410 (retired) leaves
+        # break-glass.retired next to slate_beat.py and later runs send nothing. Never fails this run.
+        try {
+            $beat = & python $slateBeat break-glass --interval-s 420 --pid $procId 2>&1 | Select-Object -Last 1
+            Write-Log "break-glass SLATE beat - $beat (rc=$LASTEXITCODE)"
+        } catch {
+            Write-Log "break-glass SLATE beat error - $($_.Exception.Message)"
+        }
+        # #339 hook: the Break-glass outside check (Healthchecks), skipped while the file is missing.
+        if (Test-Path $hcPingFile) {
+            try {
+                $hcUrl = (Get-Content $hcPingFile -TotalCount 1).Trim()
+                if ($hcUrl) {
+                    Invoke-WebRequest -Uri $hcUrl -UseBasicParsing -TimeoutSec 15 -UserAgent "discord-watcher-supervisor/1.0" | Out-Null
+                    Write-Log "break-glass outside ping OK"
+                }
+            } catch {
+                Write-Log "break-glass outside ping failed - $($_.Exception.GetType().Name)"
+            }
+        }
     } else {
         Write-Log "claude NOT running - restarting via interactive task"
         # Launch through the Interactive "Discord Watcher" task, NOT Start-Process.
