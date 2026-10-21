@@ -50,7 +50,9 @@ WHISPER_ENDPOINT=http://100.80.186.41:9001
 
 Voice defaults:
 
-- `discord_voice.py` loads the shared `Drew_code/.env` file.
+- Each script loads **only the keys it uses** from the shared `Drew_code/.env` (`env_keys.load("KEY", ...)`, #387),
+  never the whole file: a new setting must be added to that script's `env_keys.load(...)` list. A variable already
+  set in the environment wins.
 - If `WHISPER_ENDPOINT` is set, voice transcription uses `POST /transcribe` on the tower.
 - If `WHISPER_ENDPOINT` is empty, it falls back to local `faster-whisper`.
 - Empty, too-short, and punctuation-only transcripts are rejected before routing to Codex, NovaNexis, or ingest.

@@ -20,11 +20,7 @@ import sys
 import time
 from pathlib import Path
 
-from dotenv import load_dotenv
-
-# Shared Drew_code/.env (one level up from this repo)
-_env_path = Path(__file__).parent.parent / ".env"
-load_dotenv(_env_path)
+# No .env here (#387): restart.py reads no keys itself; discord_client loads its own three when it alerts.
 
 WATCHDOG_PATH    = Path(__file__).parent / "supervisor.ps1"
 LOG_PATH         = Path(__file__).parent / "restart.log"

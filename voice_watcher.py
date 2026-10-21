@@ -8,10 +8,10 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from datetime import datetime, timezone
 import requests
-from dotenv import load_dotenv
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
+import env_keys
 import discord_voice
 import slate_beat
 try:
@@ -19,7 +19,11 @@ try:
 except Exception:  # pragma: no cover - Discord notify is best-effort
     post_discord_message = None  # type: ignore[assignment]
 
-load_dotenv(Path(__file__).parent.parent / ".env")
+env_keys.load(  # only the keys this process uses, never the whole shared .env (#387)
+    "DISCORD_INBOX", "INBOX_LOG_DIR", "INBOX_MAX_AGE_HOURS", "FALLBACK_NOTIFY_CHANNEL", "FALLBACK_NOTIFY_COOLDOWN",
+    "WHISPER_MODEL", "WHISPER_ENDPOINT", "WHISPER_TIMEOUT", "WHISPER_DIARIZE", "WHISPER_LOCAL_PREWARM",
+    "SLATE_API_URL", "SLATE_JOBS_TOKEN",
+)
 
 _processing_lock = threading.Lock()
 _in_progress: set[str] = set()

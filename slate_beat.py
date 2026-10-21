@@ -11,7 +11,7 @@ The protocol (SLATE #346): POST /status/services/<name>/heartbeat. 404 = SLATE d
 register and beat again. 410 = the name is retired (a Tombstone): stop for good, never register. Every other
 failure is logged and swallowed; nothing here may take the host process down.
 
-Config (Drew_code/.env): SLATE_API_URL (e.g. https://sawyer-industries.com/api), SLATE_JOBS_TOKEN.
+Config (two keys of Drew_code/.env, read by env_keys): SLATE_API_URL (e.g. https://sawyer-industries.com/api), SLATE_JOBS_TOKEN.
 """
 
 from __future__ import annotations
@@ -151,12 +151,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--pid", type=int, default=None, help="the watched process's pid, sent on register")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    try:
-        from dotenv import load_dotenv
+    import env_keys
 
-        load_dotenv(Path(__file__).parent.parent / ".env")
-    except Exception as exc:  # pragma: no cover - dotenv missing: rely on the environment
-        log.warning(f"no .env loaded: {exc}")
+    env_keys.load("SLATE_API_URL", "SLATE_JOBS_TOKEN")  # only these, never the whole shared .env (#387)
     beat = from_env(args.name, interval_s=args.interval_s, pid=args.pid)
     if beat is None:
         log.warning("SLATE_API_URL unset: no beat sent")
