@@ -16,3 +16,7 @@ twitter_cookies.json
 whisperx_soak.jsonl
 tower_uptime.json
 .synthetic_test_tmp/
+
+# Secrets (#389): never commit an env file; the template stays.
+.env.*
+!.env.example
