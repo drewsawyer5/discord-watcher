@@ -5,7 +5,8 @@ Wants=network-online.target
 
 [Service]
 WorkingDirectory=/home/drews/discord-watcher
-EnvironmentFile=/home/drews/Drew_code/.env
+# No EnvironmentFile (#387): voice_watcher.py reads only its own keys from this file via env_keys.py.
+Environment=SHARED_ENV_FILE=/home/drews/Drew_code/.env
 Environment=PYTHONUNBUFFERED=1
 Environment=VAULT_PATH=/home/drews/obsidian
 Environment=INBOX_LOG_DIR=/home/drews/obsidian/7 - MD-AI/00 - Inbox/logs

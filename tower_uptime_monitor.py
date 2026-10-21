@@ -22,9 +22,12 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 import requests
-from dotenv import load_dotenv
+import env_keys
 
-load_dotenv(Path(__file__).parent.parent / ".env")
+env_keys.load(  # only these (#387)
+    "WHISPER_ENDPOINT", "TOWER_UPTIME_INTERVAL", "TOWER_UPTIME_CONNECT_TIMEOUT", "TOWER_UPTIME_READ_TIMEOUT",
+    "TOWER_UPTIME_NOTIFY_CHANNEL", "TOWER_UPTIME_DOWN_THRESHOLD",
+)
 
 try:
     from discord_client import post_discord_message

@@ -13,12 +13,9 @@ from typing import Any, Callable
 
 import requests
 
-try:
-    from dotenv import load_dotenv
+import env_keys
 
-    load_dotenv(Path(__file__).parent.parent / ".env")
-except Exception:
-    pass
+env_keys.load("WHISPER_ENDPOINT", "WHISPER_MODEL", "WHISPER_TIMEOUT", "WHISPER_DIARIZE")  # only these (#387)
 
 
 AUDIO_EXTENSIONS = {".ogg", ".mp3", ".mp4", ".wav", ".m4a", ".webm"}

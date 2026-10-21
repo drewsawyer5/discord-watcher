@@ -16,9 +16,9 @@ import logging
 import requests
 from pathlib import Path
 
-from dotenv import load_dotenv
+import env_keys
 
-load_dotenv(Path(__file__).parent.parent / ".env")
+env_keys.load("DISCORD_BOT_TOKEN", "INGEST_CHANNEL_ID", "GENERAL_CHANNEL_ID")  # only these (#387)
 
 BOT_TOKEN       = os.getenv("DISCORD_BOT_TOKEN", "")
 INGEST_CHANNEL_ID = os.getenv("INGEST_CHANNEL_ID", "1474888067893559360")
